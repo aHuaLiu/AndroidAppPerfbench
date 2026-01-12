@@ -26,6 +26,20 @@ TEST_DURATION_MINUTES=5
 CPU_INTERVAL=10
 MEM_INTERVAL=10
 
+# CPU Collection Method (dumpsys|procstat)
+# dumpsys  = Use dumpsys cpuinfo (existing method, sliding window)
+# procstat = Use /proc/stat (new method, precise time window, RECOMMENDED)
+CPU_METHOD="procstat"
+
+# Minimum CPU percentage threshold for valid samples
+# Set to 0.0 to include all samples, or 1.0+ to filter out idle/low-activity periods
+MIN_CPU_PERCENT=0.0
+
+# Whether to strictly require WindowMs parsing
+# 0 = allow WindowMs=-1 samples (with caution)
+# 1 = exclude WindowMs=-1 samples (strict mode)
+STRICT_WINDOW=1
+
 # Performance benchmark (custom scale)
 SINGLE_CORE_DMIPS=20599  # Single-core 100% CPU ≈ 20K DMIPS (approximate comparison)
 
@@ -44,6 +58,12 @@ REPORT_FILE="report.md"
 TEST_INTERRUPTED=0
 TEST_START_TIME=""
 TEST_DIR=""
+
+# procstat method: File-based caching (bash 3.2 compatible)
+PROCSTAT_TOTAL_PREV_FILE=""
+PROCSTAT_PID_PREV_FILE=""
+PROCSTAT_WALL_PREV_FILE=""
+PROCSTAT_NCPU=0
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -346,7 +366,7 @@ create_test_directory() {
 init_logs() {
     print_info "Initializing log files..."
 
-    if ! echo "Timestamp,Time(Seconds),CPU Percentage(%),DMIPS" > "$CPU_LOG" 2>/dev/null; then
+    if ! echo "Timestamp,Time(Seconds),CPU Percentage(%),DMIPS,WindowMs,FilterReason" > "$CPU_LOG" 2>/dev/null; then
         print_error "Unable to create CPU log file：$CPU_LOG（Please check disk space or permissions）"
         exit 1
     fi
@@ -360,32 +380,411 @@ init_logs() {
 }
 
 ################################################################################
-# Collect CPU Data (Aggregate Same-Package Multi-Process)
+# procstat: Get CPU Core Count (prefer online cores)
 ################################################################################
-collect_cpu() {
+procstat_get_ncpu() {
+    local ncpu
+    
+    # Try to get online CPU count first (more accurate for dynamic core scaling)
+    # Format: "0-7" or "0,2-5,7" etc.
+    local online
+    online=$(adb_cmd shell cat /sys/devices/system/cpu/online 2>/dev/null | tr -d '\r')
+    
+    if [[ -n "$online" ]]; then
+        # Parse ranges like "0-7" or "0,2-5,7"
+        ncpu=$(echo "$online" | awk -F',' '{
+            count=0
+            for(i=1; i<=NF; i++) {
+                if($i ~ /-/) {
+                    split($i, r, "-")
+                    count += r[2] - r[1] + 1
+                } else {
+                    count++
+                }
+            }
+            print count
+        }')
+        
+        if [[ -n "$ncpu" ]] && [[ "$ncpu" -gt 0 ]]; then
+            echo "$ncpu"
+            return 0
+        fi
+    fi
+    
+    # Fallback: Count cpu0, cpu1, ... lines in /proc/stat
+    ncpu=$(adb_cmd shell cat /proc/stat 2>/dev/null | grep -c "^cpu[0-9]" | tr -d '\r')
+    if [[ -z "$ncpu" ]] || [[ "$ncpu" -eq 0 ]]; then
+        print_warn "NCPU detection failed, defaulting to 1"
+        echo "1"
+    else
+        echo "$ncpu"
+    fi
+}
+
+################################################################################
+# procstat: Read Total System CPU Jiffies
+################################################################################
+procstat_read_total_jiffies() {
+    # Read "cpu " line (note the space) and sum all numeric fields
+    local line
+    line=$(adb_cmd shell cat /proc/stat 2>/dev/null | grep "^cpu " | tr -d '\r')
+    if [[ -z "$line" ]]; then
+        echo ""
+        return 1
+    fi
+    
+    # Sum all fields after "cpu"
+    echo "$line" | awk '{sum=0; for(i=2; i<=NF; i++) sum+=$i; print sum}'
+}
+
+################################################################################
+# procstat: Read Single Process CPU Jiffies (utime + stime)
+# Args: $1 = PID
+# Returns: utime+stime, or empty string on error
+################################################################################
+procstat_read_pid_jiffies() {
+    local pid="$1"
+    [[ -z "$pid" ]] && return 1
+    
+    local stat_line
+    stat_line=$(adb_cmd shell cat /proc/$pid/stat 2>/dev/null | tr -d '\r')
+    if [[ -z "$stat_line" ]]; then
+        return 1
+    fi
+    
+    # Parse stat line: handle comm field in parentheses (may contain spaces)
+    # Find position after ") " and extract fields from there
+    local jiffies
+    jiffies=$(echo "$stat_line" | awk '
+    {
+        line = $0
+        # Find the last ")" to handle comm with parentheses
+        idx = 0
+        for (i=1; i<=length(line); i++) {
+            if (substr(line, i, 1) == ")") idx = i
+        }
+        if (idx == 0) { print ""; exit }
+        
+        # Get substring after ") "
+        rest = substr(line, idx+1)
+        gsub(/^[[:space:]]+/, "", rest)  # trim leading spaces
+        
+        # Split rest into fields
+        n = split(rest, a, " ")
+        
+        # Original stat: 1=pid, 2=comm, 3=state, ..., 14=utime, 15=stime
+        # rest starts from field 3 (state), so:
+        # rest[1]=state(3), rest[2]=ppid(4), ..., rest[12]=utime(14), rest[13]=stime(15)
+        utime = a[12]
+        stime = a[13]
+        
+        if (utime ~ /^[0-9]+$/ && stime ~ /^[0-9]+$/) {
+            print utime + stime
+        } else {
+            print ""
+        }
+    }')
+    
+    echo "$jiffies"
+}
+
+################################################################################
+# procstat: Initialize (called once at test start)
+################################################################################
+procstat_init() {
+    print_info "Initializing procstat method..."
+    
+    # Set file paths
+    PROCSTAT_TOTAL_PREV_FILE="${TEST_DIR}/procstat_total_prev.txt"
+    PROCSTAT_PID_PREV_FILE="${TEST_DIR}/procstat_pid_prev.tsv"
+    PROCSTAT_WALL_PREV_FILE="${TEST_DIR}/procstat_wall_prev.txt"
+    
+    # Get NCPU
+    PROCSTAT_NCPU=$(procstat_get_ncpu)
+    print_info "Detected CPU cores: $PROCSTAT_NCPU"
+    
+    # Check if /proc/stat is readable
+    if ! adb_cmd shell test -r /proc/stat 2>/dev/null; then
+        print_error "/proc/stat is not readable on device"
+        print_error "Falling back to dumpsys method (set CPU_METHOD=\"dumpsys\")"
+        exit 1
+    fi
+    
+    # Read initial baseline (total jiffies)
+    local total_now
+    total_now=$(procstat_read_total_jiffies)
+    if [[ -z "$total_now" ]]; then
+        print_error "Failed to read /proc/stat"
+        exit 1
+    fi
+    
+    # Save baseline (total jiffies)
+    echo "$total_now" > "$PROCSTAT_TOTAL_PREV_FILE"
+    
+    # Initialize PID cache with current values (baseline for all existing processes)
+    print_info "Recording baseline for all current processes..."
+    local pids baseline_count=0
+    pids=$(get_all_pids)
+    
+    : > "$PROCSTAT_PID_PREV_FILE"  # Clear file first
+    
+    if [[ -n "$pids" ]]; then
+        for pid in $pids; do
+            pid=$(echo "$pid" | tr -d ' \r\n')
+            [[ -z "$pid" ]] && continue
+            
+            local proc_jiffies
+            proc_jiffies=$(procstat_read_pid_jiffies "$pid")
+            if [[ -n "$proc_jiffies" ]] && [[ "$proc_jiffies" =~ ^[0-9]+$ ]]; then
+                echo -e "${pid}\t${proc_jiffies}" >> "$PROCSTAT_PID_PREV_FILE"
+                baseline_count=$((baseline_count + 1))
+            fi
+        done
+    fi
+    
+    # Save baseline wall-clock time AFTER all init work (to avoid timing skew from PID reading)
+    echo "$(date +%s)" > "$PROCSTAT_WALL_PREV_FILE"
+    
+    print_info "CPU Method: /proc/stat (real wall-clock window, target ~${CPU_INTERVAL}s, NCPU=$PROCSTAT_NCPU)"
+    print_info "Baseline recorded: total_jiffies=$total_now, ${baseline_count} processes"
+}
+
+################################################################################
+# Collect CPU Data - /proc/stat Method (Precise Time Window)
+# Algorithm:
+#   CPU% = 100 * NCPU * (ΔProc_jiffies / ΔTotal_jiffies)
+# Where:
+#   - ΔProc_jiffies = sum of (current_pid_jiffies - prev_pid_jiffies) for all PIDs
+#   - ΔTotal_jiffies = current_total_jiffies - prev_total_jiffies
+#   - NCPU = number of CPU cores (to normalize to "100% = 1 core fully utilized")
+################################################################################
+collect_cpu_procstat() {
     local timestamp elapsed
     timestamp=$(date +%s)
     elapsed=$1
 
+    # Compute real window_ms based on wall-clock delta
+    local wall_prev wall_delta window_ms_real
+    wall_prev=$(cat "$PROCSTAT_WALL_PREV_FILE" 2>/dev/null)
+    [[ -z "$wall_prev" ]] && wall_prev="$timestamp"
+    wall_delta=$((timestamp - wall_prev))
+    [[ $wall_delta -lt 0 ]] && wall_delta=0
+    window_ms_real=$((wall_delta * 1000))
+
+    # 1. Read current system total jiffies
+    local total_now
+    total_now=$(procstat_read_total_jiffies)
+    if [[ -z "$total_now" ]]; then
+        print_warn "Failed to read /proc/stat (Time: ${elapsed}s)"
+        echo "$timestamp,$elapsed,0.00,0,0,ReadFailed:/proc/stat" >> "$CPU_LOG"
+        echo "$timestamp" > "$PROCSTAT_WALL_PREV_FILE"  # Update wall-clock to avoid cumulative delta
+        return 1
+    fi
+
+    # 2. Read previous total jiffies
+    local total_prev
+    if [[ -f "$PROCSTAT_TOTAL_PREV_FILE" ]]; then
+        total_prev=$(cat "$PROCSTAT_TOTAL_PREV_FILE" 2>/dev/null)
+    fi
+    [[ -z "$total_prev" ]] && total_prev="0"
+
+    # 3. Get all current PIDs
+    local pids
+    pids=$(get_all_pids)
+    if [[ -z "$pids" ]]; then
+        print_warn "No process PIDs found (Time: ${elapsed}s)"
+        echo "$timestamp,$elapsed,0.00,0,0,NoPID" >> "$CPU_LOG"
+        echo "$timestamp" > "$PROCSTAT_WALL_PREV_FILE"  # Update wall-clock to avoid cumulative delta
+        return 1
+    fi
+
+    # 4. Read current PID jiffies and calculate delta
+    local proc_delta_total=0
+    local pid_count=0
+    local new_pid_cache=""
+
+    for pid in $pids; do
+        pid=$(echo "$pid" | tr -d ' \r\n')
+        [[ -z "$pid" ]] && continue
+
+        # Read current jiffies for this PID
+        local proc_now
+        proc_now=$(procstat_read_pid_jiffies "$pid")
+        if [[ -z "$proc_now" ]] || ! [[ "$proc_now" =~ ^[0-9]+$ ]]; then
+            if [[ $DEBUG_MODE -eq 1 ]]; then
+                print_warn "Failed to read /proc/$pid/stat (process may have exited)"
+            fi
+            continue
+        fi
+
+        # Find previous jiffies from cache
+        local proc_prev=""
+        if [[ -f "$PROCSTAT_PID_PREV_FILE" ]]; then
+            proc_prev=$(awk -v p="$pid" '$1==p {print $2; exit}' "$PROCSTAT_PID_PREV_FILE" 2>/dev/null)
+        fi
+
+        # Calculate delta for this PID
+        local proc_delta
+        if [[ -z "$proc_prev" ]]; then
+            # New PID: baseline only (do NOT count accumulated time since process start)
+            proc_delta=0
+        else
+            proc_delta=$((proc_now - proc_prev))
+            [[ $proc_delta -lt 0 ]] && proc_delta=0
+        fi
+
+        proc_delta_total=$((proc_delta_total + proc_delta))
+        pid_count=$((pid_count + 1))
+
+        # Append to new cache
+        new_pid_cache="${new_pid_cache}${pid}\t${proc_now}\n"
+
+        if [[ $DEBUG_MODE -eq 1 ]]; then
+            echo "  PID=$pid: prev=$proc_prev, now=$proc_now, delta=$proc_delta" >&2
+        fi
+    done
+
+    # 5. Calculate system delta
+    local total_delta=$((total_now - total_prev))
+    if [[ $total_delta -le 0 ]]; then
+        print_warn "System jiffies delta invalid (delta=$total_delta), recording 0% (Time: ${elapsed}s)"
+        echo "$timestamp,$elapsed,0.00,0,0,InvalidDelta:$total_delta" >> "$CPU_LOG"
+        # Still update cache for next iteration
+        echo "$total_now" > "$PROCSTAT_TOTAL_PREV_FILE"
+        printf "%b" "$new_pid_cache" > "$PROCSTAT_PID_PREV_FILE"
+        echo "$timestamp" > "$PROCSTAT_WALL_PREV_FILE"  # Update wall-clock to avoid cumulative delta
+        return 0
+    fi
+
+    # 6. Check if this is the first sample (calibration sample)
+    # If elapsed time is very short (< CPU_INTERVAL/2), treat as baseline calibration
+    local cpu_percent window_ms filter_reason
+    if [[ $elapsed -lt $((CPU_INTERVAL / 2)) ]]; then
+        # First sample: calibration only, output 0% to establish clean baseline
+        cpu_percent="0.00"
+        window_ms=0  # Force 0 for baseline (even if wall_delta > 0)
+        filter_reason="Baseline"
+        print_info "CPU Sample [${elapsed}s]: Baseline calibration (${pid_count} processes)"
+    else
+        # 7. Calculate CPU%: 100 * NCPU * (proc_delta / total_delta)
+        # This makes "100% = 1 core fully utilized", matching dumpsys/top output
+        cpu_percent=$(awk -v pd="$proc_delta_total" -v td="$total_delta" -v nc="$PROCSTAT_NCPU" \
+            'BEGIN {printf "%.2f", 100.0 * nc * pd / td}')
+        window_ms=$window_ms_real  # Use real wall-clock delta
+        filter_reason="Valid"
+    fi
+
+    # 8. Calculate DMIPS
+    local dmips
+    dmips=$(awk -v cpu="$cpu_percent" -v base="$SINGLE_CORE_DMIPS" \
+        'BEGIN {printf "%.0f", (cpu * base) / 100}')
+
+    # 9. Save to CSV
+    echo "$timestamp,$elapsed,$cpu_percent,$dmips,$window_ms,$filter_reason" >> "$CPU_LOG"
+    
+    if [[ $elapsed -lt $((CPU_INTERVAL / 2)) ]]; then
+        # Calibration sample: no detailed output
+        :
+    else
+        # Determine if sample will be excluded from stats
+        local excluded_marker=""
+        if [[ "$filter_reason" != "Valid" ]]; then
+            excluded_marker=" [excluded from stats]"
+        fi
+        print_info "CPU Sample [${elapsed}s]: ${cpu_percent}% → ${dmips} DMIPS (window=${window_ms}ms, ${pid_count} processes, ${filter_reason})${excluded_marker}"
+    fi
+
+    # 10. Update cache files for next iteration
+    echo "$total_now" > "$PROCSTAT_TOTAL_PREV_FILE"
+    printf "%b" "$new_pid_cache" > "$PROCSTAT_PID_PREV_FILE"
+    echo "$timestamp" > "$PROCSTAT_WALL_PREV_FILE"
+
+    if [[ $DEBUG_MODE -eq 1 ]]; then
+        echo "=== DEBUG: procstat (elapsed=${elapsed}s) ===" >&2
+        echo "  total: prev=$total_prev, now=$total_now, delta=$total_delta" >&2
+        echo "  proc: delta_total=$proc_delta_total, pid_count=$pid_count" >&2
+        echo "  CPU%: 100 * $PROCSTAT_NCPU * $proc_delta_total / $total_delta = $cpu_percent%" >&2
+        echo "========================================" >&2
+    fi
+
+    return 0
+}
+
+################################################################################
+# Collect CPU Data - dumpsys Method (Sliding Window)
+################################################################################
+collect_cpu_dumpsys() {
+    local timestamp elapsed
+    timestamp=$(date +%s)
+    elapsed=$1
+
+    # Baseline sample: always excluded from statistics
+    # - Still triggers dumpsys once to "prime" the tracker
+    # - Record WindowMs=0 so report filter (>=5000ms) will exclude it
+    if [[ "$elapsed" -eq 0 ]]; then
+        adb_cmd shell dumpsys cpuinfo >/dev/null 2>&1 || true
+        echo "$timestamp,$elapsed,0.00,0,0,Baseline" >> "$CPU_LOG"
+        print_info "CPU Sample [0s]: Baseline (excluded from stats)"
+        return 0
+    fi
+
+    # Get raw dumpsys cpuinfo output first
+    local raw
+    raw=$(adb_cmd shell dumpsys cpuinfo 2>/dev/null | tr -d '\r')
+
+    # Parse window length from: "CPU usage from XXXms to YYYms ago"
+    # This tells us the actual time range of this CPU sample
+    # Note: Using POSIX-compatible awk (no match() with capture array, which gawk supports but macOS awk doesn't)
+    local window_ms
+    window_ms=$(echo "$raw" | awk '
+    /^CPU usage from / {
+        from_val=""; to_val=""
+        for(i=1; i<=NF; i++) {
+            if($i == "from") { from_val = $(i+1) }
+            if($i == "to")   { to_val   = $(i+1) }
+        }
+        gsub(/ms/, "", from_val)
+        gsub(/ms/, "", to_val)
+        if(from_val != "" && to_val != "") {
+            d = from_val - to_val
+            if (d < 0) d = -d
+            print d
+            exit
+        }
+    }')
+    [[ -z "$window_ms" ]] && window_ms="-1"
+
     # dumpsys cpuinfo lines are generally:  12% 1234/com.xxx:proc or 12% 1234/com.xxx_zygote
     # Matching rule is consistent with get_all_pids: package name followed by : or _ or space/end of line
     local cpu_output
-    # Use simple grep with fixed string, then filter with awk
-    cpu_output=$(adb_cmd shell dumpsys cpuinfo 2>/dev/null | grep -F "/$PACKAGE_NAME" | awk -v pkg="$PACKAGE_NAME" '
-        $0 ~ ("/" pkg "(:|_|[[:space:]]|$)") { print }
+    cpu_output=$(echo "$raw" | awk -v pkg="/$PACKAGE_NAME" '
+    {
+        pos = index($0, pkg);
+        if (pos == 0) next;
+
+        after = substr($0, pos + length(pkg), 1);
+
+        # accept: end-of-string / ":" / "_" / whitespace
+        if (after == "" || after == ":" || after == "_" || after ~ /[[:space:]]/) {
+            print;
+        }
+    }
     ')
 
     if [[ $DEBUG_MODE -eq 1 ]]; then
         echo "=== DEBUG: dumpsys cpuinfo head (elapsed=${elapsed}s) ===" >&2
-        adb_cmd shell dumpsys cpuinfo 2>&1 | head -30 >&2
+        echo "$raw" | head -30 >&2
+        echo "=== DEBUG: window_ms=$window_ms ===" >&2
         echo "=== DEBUG: matched lines ===" >&2
         echo "$cpu_output" >&2
         echo "================================" >&2
     fi
 
     if [ -z "$cpu_output" ]; then
-        print_warn "Unable to obtain CPU data (Time: ${elapsed}s）- Possible reasons: No activity within the sampling window"
-        echo "$timestamp,$elapsed,0.00,0" >> "$CPU_LOG"
+        local filter_reason="NoActivity"
+        [[ "$window_ms" == "-1" ]] && filter_reason="ParseFailed"
+        echo "$timestamp,$elapsed,0.00,0,$window_ms,$filter_reason" >> "$CPU_LOG"
+        print_warn "CPU Sample [${elapsed}s]: 0.00% → 0 DMIPS (window=${window_ms}ms, ${filter_reason}) [excluded from stats]"
         return 0
     fi
 
@@ -407,9 +806,39 @@ collect_cpu() {
     fi
     [[ -z "$dmips" ]] && dmips="0"
 
-    echo "$timestamp,$elapsed,$cpu_percent,$dmips" >> "$CPU_LOG"
-    print_info "CPU Sample [${elapsed}s]: ${cpu_percent}% → ${dmips} DMIPS"
+    # Determine filter reason
+    local filter_reason="Valid"
+    if [[ "$window_ms" == "-1" ]]; then
+        filter_reason="WindowUnknown"
+    elif [[ "$window_ms" -lt 5000 ]]; then
+        filter_reason="WindowTooShort"
+    elif [[ "$window_ms" -gt 30000 ]]; then
+        filter_reason="WindowTooLong"
+    fi
+
+    echo "$timestamp,$elapsed,$cpu_percent,$dmips,$window_ms,$filter_reason" >> "$CPU_LOG"
+    
+    # Determine if sample will be excluded from stats
+    local excluded_marker=""
+    if [[ "$filter_reason" != "Valid" ]] && ! ([[ $STRICT_WINDOW -eq 0 ]] && [[ "$filter_reason" == "WindowUnknown" ]]); then
+        excluded_marker=" [excluded from stats]"
+    fi
+    print_info "CPU Sample [${elapsed}s]: ${cpu_percent}% → ${dmips} DMIPS (window=${window_ms}ms, ${filter_reason})${excluded_marker}"
     return 0
+}
+
+################################################################################
+# Collect CPU Data - Routing Function (Select method based on CPU_METHOD)
+################################################################################
+collect_cpu() {
+    if [[ "$CPU_METHOD" == "procstat" ]]; then
+        collect_cpu_procstat "$@"
+    elif [[ "$CPU_METHOD" == "dumpsys" ]]; then
+        collect_cpu_dumpsys "$@"
+    else
+        print_error "Unknown CPU_METHOD: $CPU_METHOD (use 'dumpsys' or 'procstat')"
+        exit 1
+    fi
 }
 
 ################################################################################
@@ -547,6 +976,19 @@ run_test() {
     print_warn "Please ensure the application is playing a video!"
     sleep 3
 
+    # Initialize CPU collection method
+    if [[ "$CPU_METHOD" == "procstat" ]]; then
+        # procstat: Initialize baseline (no warm-up needed, uses precise delta)
+        procstat_init
+        print_info "procstat initialized, starting data collection..."
+    elif [[ "$CPU_METHOD" == "dumpsys" ]]; then
+        # dumpsys: No explicit warm-up needed (baseline sample will prime the tracker)
+        print_info "CPU Method: dumpsys cpuinfo (sliding window, baseline will prime tracker)"
+    else
+        print_error "Unknown CPU_METHOD: $CPU_METHOD"
+        exit 1
+    fi
+
     local start_time last_cpu_time last_mem_time last_alive_check
     start_time=$(date +%s)
     last_cpu_time=$start_time
@@ -556,6 +998,10 @@ run_test() {
     print_info "Starting first sample..."
     collect_cpu 0
     collect_memory 0
+    
+    # Update last sample times to avoid baseline execution time affecting next interval
+    last_cpu_time=$(date +%s)
+    last_mem_time=$(date +%s)
 
     while true; do
         local current_time elapsed
@@ -599,13 +1045,116 @@ generate_report() {
         exit 1
     fi
 
+    # CPU statistics: Filter samples based on window validity
+    # Window range depends on CPU_METHOD:
+    #   - dumpsys: 5000ms-30000ms (sliding window variability)
+    #   - procstat: >0 (fixed window=CPU_INTERVAL*1000, baseline has window=0)
+    # STRICT_WINDOW:
+    #   0 => allow WindowMs=-1 samples (parse failed, include with caution)
+    #   1 => exclude WindowMs=-1 samples
     local avg_cpu peak_cpu avg_dmips peak_dmips min_cpu min_dmips
-    avg_cpu=$(tail -n +2 "$CPU_LOG" | awk -F',' '{sum+=$3; c++} END{if(c>0) printf "%.2f", sum/c; else print "0"}')
-    peak_cpu=$(tail -n +2 "$CPU_LOG" | awk -F',' 'NR==1{m=$3} {if($3+0>m+0) m=$3} END{printf "%.2f", m}')
-    min_cpu=$(tail -n +2 "$CPU_LOG" | awk -F',' 'NR==1{m=$3} {if($3+0<m+0 || m==0) m=$3} END{printf "%.2f", m}')
-    avg_dmips=$(tail -n +2 "$CPU_LOG" | awk -F',' '{sum+=$4; c++} END{if(c>0) printf "%.0f", sum/c; else print "0"}')
-    peak_dmips=$(tail -n +2 "$CPU_LOG" | awk -F',' 'NR==1{m=$4} {if($4+0>m+0) m=$4} END{printf "%.0f", m}')
-    min_dmips=$(tail -n +2 "$CPU_LOG" | awk -F',' 'NR==1{m=$4} {if($4+0<m+0 || m==0) m=$4} END{printf "%.0f", m}')
+    local valid_cpu_samples invalid_cpu_samples unknown_window_samples
+
+    unknown_window_samples=$(tail -n +2 "$CPU_LOG" | awk -F',' '$5==-1{c++} END{print c+0}')
+
+    # Define filter condition based on CPU_METHOD
+    local window_filter
+    if [[ "$CPU_METHOD" == "procstat" ]]; then
+        window_filter='$5 > 0'  # procstat: exclude baseline (window=0)
+    else
+        window_filter='($5>=5000 && $5<=30000)'  # dumpsys: sliding window range
+    fi
+
+    # Unified filter condition: window_filter OR (STRICT_WINDOW==0 and window==-1), AND CPU% >= MIN_CPU_PERCENT
+    valid_cpu_samples=$(tail -n +2 "$CPU_LOG" | awk -F',' -v min_cpu="$MIN_CPU_PERCENT" -v strict="$STRICT_WINDOW" -v method="$CPU_METHOD" '
+        function check_window() {
+            if (method == "procstat") return $5 > 0
+            else return ($5>=5000 && $5<=30000)
+        }
+        ( check_window() || (strict==0 && $5==-1) ) && ($3>=min_cpu) && ( $6=="Valid" || (strict==0 && $6=="WindowUnknown") ) {c++}
+        END{print c+0}
+    ')
+    invalid_cpu_samples=$(tail -n +2 "$CPU_LOG" | awk -F',' -v min_cpu="$MIN_CPU_PERCENT" -v strict="$STRICT_WINDOW" -v method="$CPU_METHOD" '
+        function check_window() {
+            if (method == "procstat") return $5 > 0
+            else return ($5>=5000 && $5<=30000)
+        }
+        !( ( check_window() || (strict==0 && $5==-1) ) && ($3>=min_cpu) && ( $6=="Valid" || (strict==0 && $6=="WindowUnknown") ) ) {c++}
+        END{print c+0}
+    ')
+
+    avg_cpu=$(tail -n +2 "$CPU_LOG" | awk -F',' -v min_cpu="$MIN_CPU_PERCENT" -v strict="$STRICT_WINDOW" -v method="$CPU_METHOD" '
+        function check_window() {
+            if (method == "procstat") return $5 > 0
+            else return ($5>=5000 && $5<=30000)
+        }
+        ( check_window() || (strict==0 && $5==-1) ) && ($3>=min_cpu) && ( $6=="Valid" || (strict==0 && $6=="WindowUnknown") ) {sum+=$3; c++}
+        END{if(c>0) printf "%.2f", sum/c; else print "0"}
+    ')
+    avg_dmips=$(tail -n +2 "$CPU_LOG" | awk -F',' -v min_cpu="$MIN_CPU_PERCENT" -v strict="$STRICT_WINDOW" -v method="$CPU_METHOD" '
+        function check_window() {
+            if (method == "procstat") return $5 > 0
+            else return ($5>=5000 && $5<=30000)
+        }
+        ( check_window() || (strict==0 && $5==-1) ) && ($3>=min_cpu) && ( $6=="Valid" || (strict==0 && $6=="WindowUnknown") ) {sum+=$4; c++}
+        END{if(c>0) printf "%.0f", sum/c; else print "0"}
+    ')
+
+    peak_cpu=$(tail -n +2 "$CPU_LOG" | awk -F',' -v min_cpu="$MIN_CPU_PERCENT" -v strict="$STRICT_WINDOW" -v method="$CPU_METHOD" '
+        function check_window() {
+            if (method == "procstat") return $5 > 0
+            else return ($5>=5000 && $5<=30000)
+        }
+        ( check_window() || (strict==0 && $5==-1) ) && ($3>=min_cpu) && ( $6=="Valid" || (strict==0 && $6=="WindowUnknown") ) {
+            if(m=="" || $3+0>m+0) m=$3
+        }
+        END{if(m!="") printf "%.2f", m; else print "0"}
+    ')
+    peak_dmips=$(tail -n +2 "$CPU_LOG" | awk -F',' -v min_cpu="$MIN_CPU_PERCENT" -v strict="$STRICT_WINDOW" -v method="$CPU_METHOD" '
+        function check_window() {
+            if (method == "procstat") return $5 > 0
+            else return ($5>=5000 && $5<=30000)
+        }
+        ( check_window() || (strict==0 && $5==-1) ) && ($3>=min_cpu) && ( $6=="Valid" || (strict==0 && $6=="WindowUnknown") ) {
+            if(m=="" || $4+0>m+0) m=$4
+        }
+        END{if(m!="") printf "%.0f", m; else print "0"}
+    ')
+
+    min_cpu=$(tail -n +2 "$CPU_LOG" | awk -F',' -v min_cpu="$MIN_CPU_PERCENT" -v strict="$STRICT_WINDOW" -v method="$CPU_METHOD" '
+        function check_window() {
+            if (method == "procstat") return $5 > 0
+            else return ($5>=5000 && $5<=30000)
+        }
+        ( check_window() || (strict==0 && $5==-1) ) && ($3>=min_cpu) && ( $6=="Valid" || (strict==0 && $6=="WindowUnknown") ) {
+            if(m=="" || $3+0<m+0) m=$3
+        }
+        END{if(m!="") printf "%.2f", m; else print "0"}
+    ')
+    min_dmips=$(tail -n +2 "$CPU_LOG" | awk -F',' -v min_cpu="$MIN_CPU_PERCENT" -v strict="$STRICT_WINDOW" -v method="$CPU_METHOD" '
+        function check_window() {
+            if (method == "procstat") return $5 > 0
+            else return ($5>=5000 && $5<=30000)
+        }
+        ( check_window() || (strict==0 && $5==-1) ) && ($3>=min_cpu) && ( $6=="Valid" || (strict==0 && $6=="WindowUnknown") ) {
+            if(m=="" || $4+0<m+0) m=$4
+        }
+        END{if(m!="") printf "%.0f", m; else print "0"}
+    ')
+
+    # Collect FilterReason statistics
+    local filter_reason_stats
+    filter_reason_stats=$(tail -n +2 "$CPU_LOG" | awk -F',' '
+    {
+        reason = ($6 != "") ? $6 : "Unknown"
+        count[reason]++
+        total++
+    }
+    END {
+        for (r in count) {
+            print r ": " count[r]
+        }
+    }' | sort)
 
     local mem_samples
     mem_samples=$(tail -n +2 "$MEM_LOG" 2>/dev/null | wc -l | tr -d ' ')
@@ -705,6 +1254,16 @@ generate_report() {
 
     [[ $TEST_INTERRUPTED -eq 1 ]] && test_status="User Interrupted (Ctrl+C)"
 
+    # Determine CPU method description
+    local cpu_method_desc
+    if [[ "$CPU_METHOD" == "procstat" ]]; then
+        cpu_method_desc="/proc/stat (real wall-clock window, ~${CPU_INTERVAL}s)"
+    elif [[ "$CPU_METHOD" == "dumpsys" ]]; then
+        cpu_method_desc="dumpsys cpuinfo (sliding window)"
+    else
+        cpu_method_desc="$CPU_METHOD"
+    fi
+
     cat > "$REPORT_FILE" << EOF
 # Performance Test Report (Multi-Process Statistics)
 
@@ -713,6 +1272,7 @@ generate_report() {
 - **Test ID**: \`$TEST_START_TIME\`
 - **Application Package Name**: \`$PACKAGE_NAME\`
 - **Process Matching Rule**: \`^${PACKAGE_NAME}(:|_|$)\`（Includes :service and _zygote subprocesses）
+- **CPU Collection Method**: ${cpu_method_desc}
 - **Test Scenario**: Video Playback
 - **Planned Duration**: $TEST_DURATION_MINUTES minutes
 - **Actual Duration**: ${actual_minutes} minutes (${actual_duration} seconds)
@@ -730,8 +1290,16 @@ generate_report() {
 |------|--------|
 | Average CPU | ${avg_cpu}% (${avg_dmips} DMIPS) |
 | Peak CPU | ${peak_cpu}% (${peak_dmips} DMIPS) |
+| Minimum CPU | ${min_cpu}% (${min_dmips} DMIPS) |
 
-- **CPU Sampling Count**: $cpu_samples times (every ${CPU_INTERVAL} seconds)
+- **CPU Sampling Count**: $cpu_samples total, $valid_cpu_samples valid, $invalid_cpu_samples filtered, $unknown_window_samples WindowMs=-1 (every ${CPU_INTERVAL} seconds)
+- **CPU Method**: ${cpu_method_desc}
+- **Sample Status Breakdown**:
+$(echo "$filter_reason_stats" | sed 's/^/  - /')
+- **STRICT_WINDOW**: ${STRICT_WINDOW} (0=allow WindowMs=-1, 1=exclude WindowMs=-1)
+- **Filtering Criteria**: 
+  - Valid window range: 5000ms - 30000ms (for dumpsys sliding window) or >0ms (for procstat real wall-clock delta)
+  - Minimum CPU threshold: >= ${MIN_CPU_PERCENT}% (configurable via MIN_CPU_PERCENT parameter)
 - **Description**:
   - CPU% is the sum of CPU occupancy ratios of all matched same-package processes within the sampling window (may be > 100% on multi-core devices)
   - DMIPS is a custom conversion scale for horizontal comparison, not the actual hardware DMIPS measurement value
@@ -785,6 +1353,7 @@ EOF
     echo "  Average: ${avg_cpu}% (${avg_dmips} DMIPS)"
     echo "  Peak:    ${peak_cpu}% (${peak_dmips} DMIPS)"
     echo "  Minimum: ${min_cpu}% (${min_dmips} DMIPS)"
+    echo "  Samples: ${valid_cpu_samples} valid / ${cpu_samples} total (${invalid_cpu_samples} filtered, ${unknown_window_samples} unknown-window)"
     echo ""
     echo "💾 Memory Performance (PSS - Real Usage)"
     echo "  Average: ${avg_mem} MB"
@@ -811,7 +1380,8 @@ main() {
 
     echo ""
     echo "=========================================="
-    echo "   Performance Test Script v2.1 (multi-process)"
+    echo "   Performance Test Script v3.0"
+    echo "   (Multi-process + Dual CPU Engine)"
     echo "=========================================="
     echo ""
 
