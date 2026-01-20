@@ -2,7 +2,8 @@
 
 ################################################################################
 # Performance Test Script (Multi-Process Accurate Statistics Version)
-# Purpose: Test the CPU and memory performance of a specified application during video playback (including subprocesses like sandboxed/privileged, etc.)
+# Purpose: Test the CPU and memory performance of a specified application during
+# video playback (including subprocesses like sandboxed/privileged, etc.)
 # Platform: macOS, Linux
 # Requirements: adb tool, bc tool installed
 # created by hua.liu
@@ -15,8 +16,10 @@
 # Application package name (main process name)
 PACKAGE_NAME="com.xxx.yyy"
 
-# ADB device serial number (optional) - Specify the target device when multiple devices are connected
-# Leave blank to automatically select the first online device; you can also manually specify, e.g., ADB_SERIAL="emulator-5554"
+# ADB device serial number (optional) - Specify the target device when multiple
+# devices are connected.
+# Leave blank to automatically select the first online device; you can also
+# manually specify, e.g., ADB_SERIAL="emulator-5554"
 ADB_SERIAL=""
 
 # Test duration (minutes)
@@ -32,7 +35,8 @@ MEM_INTERVAL=10
 CPU_METHOD="procstat"
 
 # Minimum CPU percentage threshold for valid samples
-# Set to 0.0 to include all samples, or 1.0+ to filter out idle/low-activity periods
+# Set to 0.0 to include all samples, or 1.0+ to filter out idle/low-activity
+# periods
 MIN_CPU_PERCENT=0.0
 
 # Whether to strictly require WindowMs parsing
@@ -41,7 +45,8 @@ MIN_CPU_PERCENT=0.0
 STRICT_WINDOW=1
 
 # Performance benchmark (custom scale)
-SINGLE_CORE_DMIPS=20599  # Single-core 100% CPU ≈ 20K DMIPS (approximate comparison)
+# Single-core 100% CPU ≈ 20K DMIPS (approximate comparison)
+SINGLE_CORE_DMIPS=20599
 
 # Debug mode (1=output more diagnostic information)
 DEBUG_MODE=0
@@ -101,7 +106,8 @@ get_ps_output() {
 }
 
 ################################################################################
-# Get All Related Process PIDs for the Package Name (Including : and _ Subprocesses)
+# Get All Related Process PIDs for the Package Name
+#   (Including : and _ Subprocesses)
 # Matching Rule: ^PACKAGE_NAME(:|_|$)
 # Supported Formats: Package name, Package name:service, Package name_zygote
 ################################################################################
@@ -113,9 +119,10 @@ get_all_pids() {
         return 0
     fi
 
-    # Pass package name to awk without escaping - let awk handle it as plain text
+    # Pass package name to awk without escaping
+    #  - let awk handle it as plain text
     echo "$out" | awk -v pkg="$PACKAGE_NAME" '
-    BEGIN { 
+    BEGIN {
         pid_col = 2
         found_pid_col = 0
         # Escape special regex characters in awk
@@ -132,7 +139,8 @@ get_all_pids() {
             next
         }
 
-        # If PID column not found, dynamically identify (compatible with ps output without header)
+        # If PID column not found, dynamically identify
+        #  (compatible with ps output without header)
         if (found_pid_col == 0 && NF > 2) {
             for (i=1; i<=NF; i++) {
                 if ($i ~ /^[0-9]+$/ && i <= 3) { pid_col = i; break; }
@@ -141,7 +149,8 @@ get_all_pids() {
         }
 
         name = $NF
-        # Match: Package name, Package name:xxx, Package name_xxx (e.g., _zygote)
+        # Match: Package name, Package name:xxx, Package name_xxx
+        # (e.g., _zygote)
         if (name ~ ("^" pkg "(:|_|$)")) {
             print $pid_col
         }
@@ -154,7 +163,7 @@ get_all_pids() {
 handle_interrupt() {
     # Remove trap to prevent repeated triggering
     trap - INT TERM
-    
+
     print_warn "\nInterrupt signal detected (Ctrl+C), generating report..."
     TEST_INTERRUPTED=1
 
@@ -209,7 +218,8 @@ check_adb_connection() {
         exit 1
     fi
 
-    # Multiple devices: If serial not specified, automatically select the first online device
+    # Multiple devices: If serial not specified, automatically select the first
+    # online device
     if [[ -z "$ADB_SERIAL" ]] && [[ "$device_count" -gt 1 ]]; then
         print_warn "$device_count devices detected, ADB_SERIAL not specified"
         print_info "Available device list:"
@@ -235,34 +245,35 @@ check_adb_connection() {
 }
 
 ################################################################################
-# Check Application Running Status (Any process with the same package is considered running)
+# Check Application Running Status
+# (Any process with the same package is considered running)
 ################################################################################
 check_app_running() {
     print_info "Cleaning up all related processes (to prevent residual process statistics)..."
-    
+
     # Check for residual processes
     local old_pids
     old_pids=$(get_all_pids | tr '\n' ' ')
-    
+
     if [[ -n "$old_pids" ]]; then
         print_warn "Residual process PID(s) detected: $old_pids"
         print_info "Forcibly stopping the application..."
-        
+
         # Try force-stop multiple times with increasing wait times
         local max_attempts=3
         local attempt=1
         local remaining_pids
-        
+
         while [[ $attempt -le $max_attempts ]]; do
             adb_cmd shell am force-stop "$PACKAGE_NAME" 2>/dev/null
-            
+
             # Wait time increases with each attempt: 2s, 3s, 5s
             local wait_time=$((attempt + 1))
             [[ $attempt -eq 3 ]] && wait_time=5
             sleep $wait_time
-            
+
             remaining_pids=$(get_all_pids | tr '\n' ' ' | tr -d '\r')
-            
+
             if [[ -z "$remaining_pids" ]]; then
                 print_info "All residual processes cleaned up successfully"
                 break
@@ -278,7 +289,7 @@ check_app_running() {
                     print_warn "  1) Continue testing anyway (Press Enter)"
                     print_warn "  2) Manually kill processes and restart test (Press Ctrl+C, then run script again)"
                     print_warn ""
-                    read -p "Press Enter to continue or Ctrl+C to exit..." 
+                    read -p "Press Enter to continue or Ctrl+C to exit..."
                 fi
             fi
             attempt=$((attempt + 1))
@@ -286,9 +297,9 @@ check_app_running() {
     else
         print_info "No residual processes detected"
     fi
-    
+
     print_info "Checking if the application is running (multi-process mode)..."
-    
+
     local pids
     pids=$(get_all_pids | tr '\n' ' ')
 
@@ -307,7 +318,7 @@ check_app_running() {
 
     local pid_count=$(echo "$pids" | wc -w | tr -d ' ')
     print_info "Detected $pid_count process PID(s): $pids"
-    
+
     if [[ $DEBUG_MODE -eq 1 ]]; then
         print_info "DEBUG: Process name list (ps last column matches ^${PACKAGE_NAME}(:|_|$)）："
         get_ps_output | awk -v pkg="$PACKAGE_NAME" '$NF ~ ("^"pkg"(:|_|$)") {print $NF}' | tr -d '\r' | sort | uniq
@@ -318,10 +329,11 @@ check_app_running() {
 # Check if the Application is Still Running During the Test
 ################################################################################
 check_app_alive() {
-    # Check if there are any matching package processes (allowing dynamic process changes)
+    # Check if there are any matching package processes
+    # (allowing dynamic process changes)
     local current_pids
     current_pids=$(get_all_pids | tr '\n' ' ')
-    
+
     if [[ -z "$current_pids" ]]; then
         print_error "The application has stopped running (no matching processes), test terminated"
         if [[ -f "$CPU_LOG" ]] && [[ $(wc -l < "$CPU_LOG" 2>/dev/null || echo 0) -gt 1 ]]; then
@@ -384,12 +396,12 @@ init_logs() {
 ################################################################################
 procstat_get_ncpu() {
     local ncpu
-    
+
     # Try to get online CPU count first (more accurate for dynamic core scaling)
     # Format: "0-7" or "0,2-5,7" etc.
     local online
     online=$(adb_cmd shell cat /sys/devices/system/cpu/online 2>/dev/null | tr -d '\r')
-    
+
     if [[ -n "$online" ]]; then
         # Parse ranges like "0-7" or "0,2-5,7"
         ncpu=$(echo "$online" | awk -F',' '{
@@ -404,13 +416,13 @@ procstat_get_ncpu() {
             }
             print count
         }')
-        
+
         if [[ -n "$ncpu" ]] && [[ "$ncpu" -gt 0 ]]; then
             echo "$ncpu"
             return 0
         fi
     fi
-    
+
     # Fallback: Count cpu0, cpu1, ... lines in /proc/stat
     ncpu=$(adb_cmd shell cat /proc/stat 2>/dev/null | grep -c "^cpu[0-9]" | tr -d '\r')
     if [[ -z "$ncpu" ]] || [[ "$ncpu" -eq 0 ]]; then
@@ -432,7 +444,7 @@ procstat_read_total_jiffies() {
         echo ""
         return 1
     fi
-    
+
     # Sum all fields after "cpu"
     echo "$line" | awk '{sum=0; for(i=2; i<=NF; i++) sum+=$i; print sum}'
 }
@@ -445,13 +457,13 @@ procstat_read_total_jiffies() {
 procstat_read_pid_jiffies() {
     local pid="$1"
     [[ -z "$pid" ]] && return 1
-    
+
     local stat_line
     stat_line=$(adb_cmd shell cat /proc/$pid/stat 2>/dev/null | tr -d '\r')
     if [[ -z "$stat_line" ]]; then
         return 1
     fi
-    
+
     # Parse stat line: handle comm field in parentheses (may contain spaces)
     # Find position after ") " and extract fields from there
     local jiffies
@@ -464,27 +476,28 @@ procstat_read_pid_jiffies() {
             if (substr(line, i, 1) == ")") idx = i
         }
         if (idx == 0) { print ""; exit }
-        
+
         # Get substring after ") "
         rest = substr(line, idx+1)
         gsub(/^[[:space:]]+/, "", rest)  # trim leading spaces
-        
+
         # Split rest into fields
         n = split(rest, a, " ")
-        
+
         # Original stat: 1=pid, 2=comm, 3=state, ..., 14=utime, 15=stime
         # rest starts from field 3 (state), so:
-        # rest[1]=state(3), rest[2]=ppid(4), ..., rest[12]=utime(14), rest[13]=stime(15)
+        # rest[1]=state(3), rest[2]=ppid(4), ...,
+        #   rest[12]=utime(14), rest[13]=stime(15)
         utime = a[12]
         stime = a[13]
-        
+
         if (utime ~ /^[0-9]+$/ && stime ~ /^[0-9]+$/) {
             print utime + stime
         } else {
             print ""
         }
     }')
-    
+
     echo "$jiffies"
 }
 
@@ -493,23 +506,23 @@ procstat_read_pid_jiffies() {
 ################################################################################
 procstat_init() {
     print_info "Initializing procstat method..."
-    
+
     # Set file paths
     PROCSTAT_TOTAL_PREV_FILE="${TEST_DIR}/procstat_total_prev.txt"
     PROCSTAT_PID_PREV_FILE="${TEST_DIR}/procstat_pid_prev.tsv"
     PROCSTAT_WALL_PREV_FILE="${TEST_DIR}/procstat_wall_prev.txt"
-    
+
     # Get NCPU
     PROCSTAT_NCPU=$(procstat_get_ncpu)
     print_info "Detected CPU cores: $PROCSTAT_NCPU"
-    
+
     # Check if /proc/stat is readable
     if ! adb_cmd shell test -r /proc/stat 2>/dev/null; then
         print_error "/proc/stat is not readable on device"
         print_error "Falling back to dumpsys method (set CPU_METHOD=\"dumpsys\")"
         exit 1
     fi
-    
+
     # Read initial baseline (total jiffies)
     local total_now
     total_now=$(procstat_read_total_jiffies)
@@ -517,22 +530,23 @@ procstat_init() {
         print_error "Failed to read /proc/stat"
         exit 1
     fi
-    
+
     # Save baseline (total jiffies)
     echo "$total_now" > "$PROCSTAT_TOTAL_PREV_FILE"
-    
-    # Initialize PID cache with current values (baseline for all existing processes)
+
+    # Initialize PID cache with current values
+    #  (baseline for all existing processes)
     print_info "Recording baseline for all current processes..."
     local pids baseline_count=0
     pids=$(get_all_pids)
-    
+
     : > "$PROCSTAT_PID_PREV_FILE"  # Clear file first
-    
+
     if [[ -n "$pids" ]]; then
         for pid in $pids; do
             pid=$(echo "$pid" | tr -d ' \r\n')
             [[ -z "$pid" ]] && continue
-            
+
             local proc_jiffies
             proc_jiffies=$(procstat_read_pid_jiffies "$pid")
             if [[ -n "$proc_jiffies" ]] && [[ "$proc_jiffies" =~ ^[0-9]+$ ]]; then
@@ -541,10 +555,11 @@ procstat_init() {
             fi
         done
     fi
-    
-    # Save baseline wall-clock time AFTER all init work (to avoid timing skew from PID reading)
+
+    # Save baseline wall-clock time AFTER all init work
+    #  (to avoid timing skew from PID reading)
     echo "$(date +%s)" > "$PROCSTAT_WALL_PREV_FILE"
-    
+
     print_info "CPU Method: /proc/stat (real wall-clock window, target ~${CPU_INTERVAL}s, NCPU=$PROCSTAT_NCPU)"
     print_info "Baseline recorded: total_jiffies=$total_now, ${baseline_count} processes"
 }
@@ -554,9 +569,12 @@ procstat_init() {
 # Algorithm:
 #   CPU% = 100 * NCPU * (ΔProc_jiffies / ΔTotal_jiffies)
 # Where:
-#   - ΔProc_jiffies = sum of (current_pid_jiffies - prev_pid_jiffies) for all PIDs
-#   - ΔTotal_jiffies = current_total_jiffies - prev_total_jiffies
-#   - NCPU = number of CPU cores (to normalize to "100% = 1 core fully utilized")
+#   - ΔProc_jiffies
+#        sum of (current_pid_jiffies - prev_pid_jiffies)for all PIDs
+#   - ΔTotal_jiffies
+#        current_total_jiffies - prev_total_jiffies
+#   - NCPU
+#        number of CPU cores (to normalize to "100% = 1 core fully utilized")
 ################################################################################
 collect_cpu_procstat() {
     local timestamp elapsed
@@ -577,7 +595,8 @@ collect_cpu_procstat() {
     if [[ -z "$total_now" ]]; then
         print_warn "Failed to read /proc/stat (Time: ${elapsed}s)"
         echo "$timestamp,$elapsed,0.00,0,0,ReadFailed:/proc/stat" >> "$CPU_LOG"
-        echo "$timestamp" > "$PROCSTAT_WALL_PREV_FILE"  # Update wall-clock to avoid cumulative delta
+        # Update wall-clock to avoid cumulative delta
+        echo "$timestamp" > "$PROCSTAT_WALL_PREV_FILE"
         return 1
     fi
 
@@ -594,7 +613,8 @@ collect_cpu_procstat() {
     if [[ -z "$pids" ]]; then
         print_warn "No process PIDs found (Time: ${elapsed}s)"
         echo "$timestamp,$elapsed,0.00,0,0,NoPID" >> "$CPU_LOG"
-        echo "$timestamp" > "$PROCSTAT_WALL_PREV_FILE"  # Update wall-clock to avoid cumulative delta
+        # Update wall-clock to avoid cumulative delta
+        echo "$timestamp" > "$PROCSTAT_WALL_PREV_FILE"
         return 1
     fi
 
@@ -626,7 +646,8 @@ collect_cpu_procstat() {
         # Calculate delta for this PID
         local proc_delta
         if [[ -z "$proc_prev" ]]; then
-            # New PID: baseline only (do NOT count accumulated time since process start)
+            # New PID: baseline only
+            # (do NOT count accumulated time since process start)
             proc_delta=0
         else
             proc_delta=$((proc_now - proc_prev))
@@ -652,12 +673,14 @@ collect_cpu_procstat() {
         # Still update cache for next iteration
         echo "$total_now" > "$PROCSTAT_TOTAL_PREV_FILE"
         printf "%b" "$new_pid_cache" > "$PROCSTAT_PID_PREV_FILE"
-        echo "$timestamp" > "$PROCSTAT_WALL_PREV_FILE"  # Update wall-clock to avoid cumulative delta
+        # Update wall-clock to avoid cumulative delta
+        echo "$timestamp" > "$PROCSTAT_WALL_PREV_FILE"
         return 0
     fi
 
     # 6. Check if this is the first sample (calibration sample)
-    # If elapsed time is very short (< CPU_INTERVAL/2), treat as baseline calibration
+    # If elapsed time is very short (< CPU_INTERVAL/2), treat as baseline
+    # calibration
     local cpu_percent window_ms filter_reason
     if [[ $elapsed -lt $((CPU_INTERVAL / 2)) ]]; then
         # First sample: calibration only, output 0% to establish clean baseline
@@ -681,7 +704,7 @@ collect_cpu_procstat() {
 
     # 9. Save to CSV
     echo "$timestamp,$elapsed,$cpu_percent,$dmips,$window_ms,$filter_reason" >> "$CPU_LOG"
-    
+
     if [[ $elapsed -lt $((CPU_INTERVAL / 2)) ]]; then
         # Calibration sample: no detailed output
         :
@@ -734,7 +757,8 @@ collect_cpu_dumpsys() {
 
     # Parse window length from: "CPU usage from XXXms to YYYms ago"
     # This tells us the actual time range of this CPU sample
-    # Note: Using POSIX-compatible awk (no match() with capture array, which gawk supports but macOS awk doesn't)
+    # Note: Using POSIX-compatible awk (no match() with capture array,
+    #       which gawk supports but macOS awk doesn't)
     local window_ms
     window_ms=$(echo "$raw" | awk '
     /^CPU usage from / {
@@ -754,8 +778,10 @@ collect_cpu_dumpsys() {
     }')
     [[ -z "$window_ms" ]] && window_ms="-1"
 
-    # dumpsys cpuinfo lines are generally:  12% 1234/com.xxx:proc or 12% 1234/com.xxx_zygote
-    # Matching rule is consistent with get_all_pids: package name followed by : or _ or space/end of line
+    # dumpsys cpuinfo lines are generally:
+    #    12% 1234/com.xxx:proc or 12% 1234/com.xxx_zygote
+    # Matching rule is consistent with get_all_pids: package name followed by :
+    #    or _ or space/end of line
     local cpu_output
     cpu_output=$(echo "$raw" | awk -v pkg="/$PACKAGE_NAME" '
     {
@@ -817,7 +843,7 @@ collect_cpu_dumpsys() {
     fi
 
     echo "$timestamp,$elapsed,$cpu_percent,$dmips,$window_ms,$filter_reason" >> "$CPU_LOG"
-    
+
     # Determine if sample will be excluded from stats
     local excluded_marker=""
     if [[ "$filter_reason" != "Valid" ]] && ! ([[ $STRICT_WINDOW -eq 0 ]] && [[ "$filter_reason" == "WindowUnknown" ]]); then
@@ -842,7 +868,8 @@ collect_cpu() {
 }
 
 ################################################################################
-# Collect Memory Data (Forced PID-by-PID Aggregation: Ensures Inclusion of : Subprocesses)
+# Collect Memory Data
+#  (Forced PID-by-PID Aggregation: Ensures Inclusion of : Subprocesses)
 ################################################################################
 collect_memory() {
     local timestamp elapsed
@@ -867,7 +894,8 @@ collect_memory() {
         echo "============================================" >&2
     fi
 
-    # Use for loop instead of while read (to avoid adb shell consuming stdin causing premature loop termination)
+    # Use for loop instead of while read (to avoid adb shell consuming stdin
+    # causing premature loop termination)
     for PID in $pids; do
         PID=$(echo "$PID" | tr -d ' \r\n')
         [[ -z "$PID" ]] && continue
@@ -903,7 +931,8 @@ collect_memory() {
             PSS=$(echo "$meminfo_output" | grep -i "TOTAL PSS" | head -1 | grep -oE '[0-9]{3,}' | head -1)
         fi
 
-        # Independently parse RSS (optional, missing RSS does not affect PSS statistics)
+        # Independently parse RSS
+        # (optional, missing RSS does not affect PSS statistics)
         local RSS
         # Try multiple patterns for better compatibility
         RSS=$(echo "$meminfo_output" | grep -i "TOTAL RSS:" | head -1 | awk '{
@@ -933,7 +962,7 @@ collect_memory() {
             fi
 
             proc_count=$((proc_count + 1))
-            
+
             if [[ $DEBUG_MODE -eq 1 ]]; then
                 echo "    ✓ Included (Current Total: PSS=${TOTAL_PSS_KB} KB, RSS=${TOTAL_RSS_KB} KB, count=${proc_count}）" >&2
             fi
@@ -957,7 +986,7 @@ collect_memory() {
     if [[ -z "$pss_mb" ]]; then
         pss_mb=$(awk -v kb="$TOTAL_PSS_KB" 'BEGIN {printf "%.2f", kb / 1024}')
     fi
-    
+
     rss_mb=$(echo "scale=2; $TOTAL_RSS_KB / 1024" | bc 2>/dev/null)
     if [[ -z "$rss_mb" ]]; then
         rss_mb=$(awk -v kb="$TOTAL_RSS_KB" 'BEGIN {printf "%.2f", kb / 1024}')
@@ -982,7 +1011,8 @@ run_test() {
         procstat_init
         print_info "procstat initialized, starting data collection..."
     elif [[ "$CPU_METHOD" == "dumpsys" ]]; then
-        # dumpsys: No explicit warm-up needed (baseline sample will prime the tracker)
+        # dumpsys: No explicit warm-up needed
+        # (baseline sample will prime the tracker)
         print_info "CPU Method: dumpsys cpuinfo (sliding window, baseline will prime tracker)"
     else
         print_error "Unknown CPU_METHOD: $CPU_METHOD"
@@ -998,8 +1028,9 @@ run_test() {
     print_info "Starting first sample..."
     collect_cpu 0
     collect_memory 0
-    
-    # Update last sample times to avoid baseline execution time affecting next interval
+
+    # Update last sample times to avoid baseline execution time affecting next
+    # interval
     last_cpu_time=$(date +%s)
     last_mem_time=$(date +%s)
 
@@ -1226,7 +1257,8 @@ generate_report() {
         mem_leak="Unable to determine (Insufficient data)"
     elif [[ "$mem_slope" =~ ^-?[0-9]+(\.[0-9]+)?$ ]]; then
         local is_high is_low
-        is_high=$(echo "$mem_slope > 0.005" | bc 2>/dev/null | tr -d '\r\n')   # 0.005MB/s ≈ 300MB/h
+        # 0.005MB/s ≈ 300MB/h
+        is_high=$(echo "$mem_slope > 0.005" | bc 2>/dev/null | tr -d '\r\n')
         is_low=$(echo "$mem_slope < -0.001" | bc 2>/dev/null | tr -d '\r\n')
         if [[ "$is_high" == "1" ]]; then
             local inc
@@ -1297,7 +1329,7 @@ generate_report() {
 - **Sample Status Breakdown**:
 $(echo "$filter_reason_stats" | sed 's/^/  - /')
 - **STRICT_WINDOW**: ${STRICT_WINDOW} (0=allow WindowMs=-1, 1=exclude WindowMs=-1)
-- **Filtering Criteria**: 
+- **Filtering Criteria**:
   - Valid window range: 5000ms - 30000ms (for dumpsys sliding window) or >0ms (for procstat real wall-clock delta)
   - Minimum CPU threshold: >= ${MIN_CPU_PERCENT}% (configurable via MIN_CPU_PERCENT parameter)
 - **Description**:
