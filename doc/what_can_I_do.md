@@ -2,9 +2,9 @@
 
 ## Technical Documentation
 
-> **Version**: 3.0  
-> **Author**: hua.liu  
-> **Platform**: macOS, Linux  
+> **Version**: 3.0
+> **Author**: hua.liu
+> **Platform**: macOS, Linux
 > **Purpose**: Measure CPU and memory performance of Android applications during runtime (supports multi-process statistics)
 
 ---
@@ -92,39 +92,40 @@ Before testing begins, the script:
 
 ---
 
-## Configuration Parameters
+## Command Options/Configuration Parameters
 
 All configurable parameters are located at the top of the script:
 
 ### Basic Settings
 
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `PACKAGE_NAME` | String | `com.xxx.yyy` | Target application package name |
-| `ADB_SERIAL` | String | `""` (empty) | Device serial number (leave empty for auto-detection) |
-| `TEST_DURATION_MINUTES` | Integer | `5` | Test duration in minutes |
+| Command Option | Parameter | Type | Default | Description |
+|----|-----------|------|---------|-------------|
+| `(package_name)` | `PACKAGE_NAME` | String | `com.xxx.yyy` | Target application package name |
+| `-a` | `ADB_SERIAL` | String | `""` (empty) | Device serial number (leave empty for auto-detection) |
+| `-t` | `TEST_DURATION_MINUTES` | Integer | `5` | Test duration in minutes |
 
 ### Sampling Settings
 
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `CPU_INTERVAL` | Integer | `10` | CPU sampling interval in seconds |
-| `MEM_INTERVAL` | Integer | `10` | Memory sampling interval in seconds |
+The command option shared by CPU and Memory interval.
+| Command Option | Parameter | Type | Default | Description |
+|----|-----------|------|---------|-------------|
+| `-i` | `CPU_INTERVAL` | Integer | `10` | CPU sampling interval in seconds |
+| `-i` | `MEM_INTERVAL` | Integer | `10` | Memory sampling interval in seconds |
 
 ### CPU Collection Settings
 
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `CPU_METHOD` | String | `procstat` | CPU collection method: `procstat` or `dumpsys` |
-| `MIN_CPU_PERCENT` | Float | `0.0` | Minimum CPU% threshold for valid samples |
-| `STRICT_WINDOW` | Integer | `1` | WindowMs parsing strictness (0=lenient, 1=strict) |
-| `SINGLE_CORE_DMIPS` | Integer | `20599` | DMIPS value per CPU core at 100% utilization |
+| Command Option | Parameter | Type | Default | Description |
+|----|-----------|------|---------|-------------|
+| `-m` | `CPU_METHOD` | String | `procstat` | CPU collection method: `procstat` or `dumpsys` |
+| NotDefined | `MIN_CPU_PERCENT` | Float | `0.0` | Minimum CPU% threshold for valid samples |
+| NotDefined | `STRICT_WINDOW` | Integer | `1` | WindowMs parsing strictness (0=lenient, 1=strict) |
+| `-s` | `SINGLE_CORE_DMIPS` | Integer | `20599` | DMIPS value per CPU core at 100% utilization |
 
 ### Debug Settings
 
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `DEBUG_MODE` | Integer | `0` | Enable verbose diagnostic output (0=off, 1=on) |
+| Command Option | Parameter | Type | Default | Description |
+|-----|-----------|------|---------|-------------|
+| `-d` | `DEBUG_MODE` | Integer | `0` | Enable verbose diagnostic output (0=off, 1=on) |
 
 ---
 

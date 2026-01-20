@@ -107,55 +107,60 @@ Options:
 
 ---
 
-## Step 4: Configure the Test Script
+## Step 4: the Test Script Option
 
 ### 4.1 Download the Script
 
 File name: `android_app_perfbench.sh`
 
-### 4.2 Required Configuration
+### 4.2 Options
 
-Open the script and modify the following settings:
-
-#### App Package Name (Required)
-```bash
-PACKAGE_NAME="com.xxx.yyy"
+```
+Usage: android_app_perfbench.sh <options> (package_name)
+  package_name: Target application package name
+  options:
+    -t <min>: Test Duration minutes (default: 5 [min])
+    -i <sec>: Sampling interval (default: 10 [sec])
+    -a <num>: Device serial number (leave empty for auto-detection)
+    -s <num>: Single core DMIPS (default: 20000)
+    -d: Enable verbose diagnostic output
 ```
 
-Set your app’s package name:
+Use options the following settings:
+
+#### Target Application Package Name (Required)
+
+Set your app's package name:
 ```bash
-PACKAGE_NAME="your.package.name"
+android_app_perfbench.sh your.package.name
 ```
 
 #### Test Duration
-```bash
-TEST_DURATION_MINUTES=5
-```
 
-Change this based on your test plan (e.g., 10, 15, 20 minutes)
+Change this based on your test plan (e.g., 10, 15, 20 minutes).
+```bash
+android_app_perfbench.sh -t 5 your.package.name
+```
 
 #### Sampling Interval (Usually Not Changed)
 
+Values shared by CPU and Memory interval.
 ```bash
-CPU_INTERVAL=10
-MEM_INTERVAL=10
+android_app_perfbench.sh -i 10 your.package.name
 ```
 
 #### ADB Device Serial Number (Only if multiple devices)
-```bash
-ADB_SERIAL=""
-```
 
 Specify like:
 ```bash
-ADB_SERIAL="ABCD1234567890"
+android_app_perfbench.sh -a ABCD1234567890 your.package.name
 ```
 
 #### CPU Performance (DMIPS per core)
-```bash
-SINGLE_CORE_DMIPS=20000
-```
 
+```bash
+android_app_perfbench.sh -s 20000 your.package.name
+```
 Adjust based on your CPU info:
 - Formula 1: `Total DMIPS / CPU cores`
 - Formula 2: `Sum of per-core DMIPS / core count`

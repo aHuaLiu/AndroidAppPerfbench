@@ -1407,38 +1407,117 @@ EOF
 ################################################################################
 # Main Function
 ################################################################################
-main() {
-    trap 'handle_interrupt' INT TERM
-
-    echo ""
-    echo "=========================================="
-    echo "   Performance Test Script v3.0"
-    echo "   (Multi-process + Dual CPU Engine)"
-    echo "=========================================="
-    echo ""
-
-    check_dependencies
-    check_adb_connection
-    check_app_running
-    create_test_directory
-    init_logs
-    run_test
-    generate_report
-
-    print_info "Test completed! Please check the report: $REPORT_FILE"
-    echo ""
-    echo "=========================================="
-    echo "   Test Results Saved To Directory："
-    echo "   📁 $TEST_DIR"
-    echo ""
-    echo "   Test ID: $TEST_START_TIME"
-    echo ""
-    echo "   Included Files："
-    echo "   - CPU Data: $CPU_LOG"
-    echo "   - Memory Data: $MEM_LOG"
-    echo "   - Test Report: $REPORT_FILE"
-    echo "=========================================="
-    echo ""
+help() {
+    echo "Usage: $0 <options> (package_name)"
+    echo "  package_name: Target application package name"
+    echo "  options:"
+    echo "    -a <num>: Device serial number (leave empty for auto-detection)"
+    echo "    -t <min>: Test Duration minutes (default: 5 [min])"
+    echo "    -m <type>: CPU method ('procstat', 'dumpsys  default:procstat)"
+    echo "    -i <sec>: Sampling interval (default: 1sec when procstat, 10sec when dumpsys)"
+    echo "    -s <num>: Single core DMIPS (default: 20000)"
+    echo "    -d: Enable verbose diagnostic output"
+    exit 1
 }
 
-main
+INTERVAL_SEC=0
+
+while getopts a:t:m:i:s:d opt; do
+    case "$opt" in
+        a)
+            ADB_SERIAL="$OPTARG"
+            ;;
+        t)
+            if [[ "$OPTARG" =~ ^[0-9]+$ ]]; then
+                :
+            else
+                echo "Test Duration minutes option -t must be number."
+                help
+            fi
+            TEST_DURATION_MINUTES="$OPTARG"
+            ;;
+        m)
+            if [[ "$OPTARG" == "procstat" ]]; then
+                CPU_METHOD="procstat"
+            elif [[ "$OPTARG" == "dumpsys" ]]; then
+                CPU_METHOD="dumpsys"
+            else
+                help
+            fi
+            ;;
+        i)
+            if [[ "$OPTARG" =~ ^[0-9]+$ ]]; then
+                :
+            else
+                echo "Sampling interval option -i must be number."
+                help
+            fi
+            INTERVAL_SEC="$OPTARG"
+            ;;
+        s)
+            if [[ "$OPTARG" =~ ^[0-9]+$ ]]; then
+                :
+            else
+                echo "Single core DMIPS option -d must be number."
+                help
+            fi
+            SINGLE_CORE_DMIPS="$OPTARG"
+            ;;
+        d)
+            DEBUG_MODE=1
+            ;;
+        h)
+            help
+            ;;
+        \?)
+            help
+            ;;
+    esac
+done
+shift $((OPTIND - 1))
+PACKAGE_NAME="$1"
+if [ -z $PACKAGE_NAME ]; then
+    echo "Must set package_name"
+    help
+fi
+
+if [ $INTERVAL_SEC -ne 0 ]; then
+    if [ "$CPU_METHOD" == "dumpsys" ] && [ $INTERVAL_SEC -lt 10 ]; then
+        echo "Sampling interval must be larger than 10sec when CPU_METHOD is dumpsys"
+        help
+    fi
+    CPU_INTERVAL=$INTERVAL_SEC
+    MEM_INTERVAL=$INTERVAL_SEC
+fi
+
+trap 'handle_interrupt' INT TERM
+
+echo ""
+echo "=========================================="
+echo "   Performance Test Script v3.0"
+echo "   (Multi-process + Dual CPU Engine)"
+echo "=========================================="
+echo ""
+
+check_dependencies
+check_adb_connection
+check_app_running
+create_test_directory
+init_logs
+run_test
+generate_report
+
+print_info "Test completed! Please check the report: $REPORT_FILE"
+echo ""
+echo "=========================================="
+echo "   Test Results Saved To Directory："
+echo "   📁 $TEST_DIR"
+echo ""
+echo "   Test ID: $TEST_START_TIME"
+echo ""
+echo "   Included Files："
+echo "   - CPU Data: $CPU_LOG"
+echo "   - Memory Data: $MEM_LOG"
+echo "   - Test Report: $REPORT_FILE"
+echo "=========================================="
+echo ""
