@@ -906,103 +906,54 @@ collect_memory() {
         echo "============================================" >&2
     fi
 
-    # Use for loop instead of while read (to avoid adb shell consuming stdin
-    # causing premature loop termination)
-    for PID in $pids; do
-        PID=$(echo "$PID" | tr -d ' \r\n')
-        [[ -z "$PID" ]] && continue
-
-        if [[ $DEBUG_MODE -eq 1 ]]; then
-            echo "  → Processing PID=$PID ..." >&2
-        fi
-
-        # Get dumpsys meminfo output
-        local meminfo_output
-        meminfo_output=$(adb_cmd shell dumpsys meminfo "$PID" 2>/dev/null | tr -d '\r')
-
-        if [[ -z "$meminfo_output" ]]; then
-            if [[ $DEBUG_MODE -eq 1 ]]; then
-                echo "    ✗ Unable to obtain dumpsys meminfo output" >&2
-            fi
-            continue
-        fi
-
-        # Independently parse PSS (highest priority, must not be missed)
-        local PSS
-        # Try multiple patterns for better compatibility
-        PSS=$(echo "$meminfo_output" | grep -i "TOTAL PSS:" | head -1 | awk '{
-            for (i=1; i<=NF; i++) {
-                if ($i ~ /^[0-9]+$/) {
-                    prev = (i > 1) ? $(i-1) : ""
-                    if (prev ~ /PSS:?$/ || prev == "PSS" || prev == "PSS:") { print $i; exit }
-                }
-            }
-        }')
-        # Fallback: try to find first number after "TOTAL PSS"
-        if [[ -z "$PSS" ]] || ! [[ "$PSS" =~ ^[0-9]+$ ]]; then
-            PSS=$(echo "$meminfo_output" | grep -i "TOTAL PSS" | head -1 | grep -oE '[0-9]{3,}' | head -1)
-        fi
-
-        # Independently parse RSS
-        # (optional, missing RSS does not affect PSS statistics)
-        local RSS
-        # Try multiple patterns for better compatibility
-        RSS=$(echo "$meminfo_output" | grep -i "TOTAL RSS:" | head -1 | awk '{
-            for (i=1; i<=NF; i++) {
-                if ($i ~ /^[0-9]+$/) {
-                    prev = (i > 1) ? $(i-1) : ""
-                    if (prev ~ /RSS:?$/ || prev == "RSS" || prev == "RSS:") { print $i; exit }
-                }
-            }
-        }')
-        # Fallback: try to find first number after "TOTAL RSS"
-        if [[ -z "$RSS" ]] || ! [[ "$RSS" =~ ^[0-9]+$ ]]; then
-            RSS=$(echo "$meminfo_output" | grep -i "TOTAL RSS" | head -1 | grep -oE '[0-9]{3,}' | head -1)
-        fi
-
-        if [[ $DEBUG_MODE -eq 1 ]]; then
-            echo "    Parsed: PSS=$PSS KB, RSS=$RSS KB" >&2
-        fi
-
-        # PSS is mandatory, skip this PID if missing
-        if [[ "$PSS" =~ ^[0-9]+$ ]] && [[ $PSS -gt 0 ]]; then
-            TOTAL_PSS_KB=$((TOTAL_PSS_KB + PSS))
-
-            # RSS optional, record 0 if missing
-            if [[ "$RSS" =~ ^[0-9]+$ ]] && [[ $RSS -gt 0 ]]; then
-                TOTAL_RSS_KB=$((TOTAL_RSS_KB + RSS))
-            fi
-
-            proc_count=$((proc_count + 1))
-
-            if [[ $DEBUG_MODE -eq 1 ]]; then
-                echo "    ✓ Included (Current Total: PSS=${TOTAL_PSS_KB} KB, RSS=${TOTAL_RSS_KB} KB, count=${proc_count}）" >&2
-            fi
-        else
-            if [[ $DEBUG_MODE -eq 1 ]]; then
-                echo "    ✗ PSS validation failed (PSS=$PSS）" >&2
-                echo "    TOTAL PSS line:" >&2
-                echo "$meminfo_output" | grep -i "TOTAL PSS:" | head -1 >&2
-            fi
-        fi
+    print_warn "collect_memory() CURRENT_PIDS:$CURRENT_PIDS"
+    local proc_smaps_list=""
+    for pid in $CURRENT_PIDS; do
+        pid=$(echo "$pid" | tr -d ' \r\n')
+        [[ -z "$pid" ]] && continue
+        proc_smaps_list="$proc_smaps_list /proc/$pid/smaps_rollup"
     done
+    print_warn "collect_memory() proc_smaps_list:$proc_smaps_list"
+    [[ -z "$proc_smaps_list" ]] && return 1
+
+    local smaps_lines
+    smaps_lines=$(adb_cmd shell cat $proc_smaps_list 2>/dev/null)
+    if [[ -z "$smaps_lines" ]]; then
+        if [[ $DEBUG_MODE -eq 1 ]]; then
+            print_warn "Failed to read /proc/pid/smaps_rollup (process may have exited)"
+        fi
+        return 1
+    fi
+    print_warn "collect_memory() gets smaps_lines"
+
+    TOTAL_PSS_KB=$(echo "$smaps_lines" | awk '/^Pss:/ {sum += $2} END {print sum}')
+    TOTAL_RSS_KB=$(echo "$smaps_lines" | awk '/^Rss:/ {sum += $2} END {print sum}')
+    print_warn "collect_memory() TOTAL_PSS_KB:$TOTAL_PSS_KB  TOTAL_RSS_KB:$TOTAL_RSS_KB"
 
     if [[ $TOTAL_PSS_KB -eq 0 ]]; then
         print_warn "Memory data extraction failed (Time: ${elapsed}s）"
         return 1
     fi
 
-    local pss_mb rss_mb
-    # Use awk fallback if bc fails (MinGW compatibility)
-    pss_mb=$(echo "scale=2; $TOTAL_PSS_KB / 1024" | bc 2>/dev/null)
-    if [[ -z "$pss_mb" ]]; then
-        pss_mb=$(awk -v kb="$TOTAL_PSS_KB" 'BEGIN {printf "%.2f", kb / 1024}')
-    fi
+    # Convert KB to MB without awk
+    # Uses bc if available; otherwise, performs fixed-point math using Bash integers
+    calculate_mb() {
+        local kb=$1
+        local mb
+        mb=$(echo "scale=2; $kb / 1024" | bc 2>/dev/null)
+        if [[ -z "$mb" ]]; then
+            # Fallback: Bash integer math for systems without bc/awk
+            # (kb * 100 / 1024) allows us to get the first two decimal places
+            local whole=$(( kb / 1024 ))
+            local fraction=$(( (kb * 100 / 1024) % 100 ))
+            printf -v mb "%d.%02d" "$whole" "$fraction"
+        fi
+        echo "$mb"
+    }
 
-    rss_mb=$(echo "scale=2; $TOTAL_RSS_KB / 1024" | bc 2>/dev/null)
-    if [[ -z "$rss_mb" ]]; then
-        rss_mb=$(awk -v kb="$TOTAL_RSS_KB" 'BEGIN {printf "%.2f", kb / 1024}')
-    fi
+    local pss_mb rss_mb
+    pss_mb=$(calculate_mb "$TOTAL_PSS_KB")
+    rss_mb=$(calculate_mb "$TOTAL_RSS_KB")
 
     echo "$timestamp,$elapsed,$TOTAL_RSS_KB,$rss_mb,$TOTAL_PSS_KB,$pss_mb" >> "$MEM_LOG"
     print_info "Memory Sample [${elapsed}s]: PSS=${pss_mb} MB, RSS=${rss_mb} MB (pid-by-pid, ${proc_count} processes)"
