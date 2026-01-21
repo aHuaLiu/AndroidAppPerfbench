@@ -612,20 +612,42 @@ collect_cpu_procstat() {
     local pid_count=0
     local new_pid_cache=""
 
-    local pids=$CURRENT_PIDS
-
-    for pid in $pids; do
+    local proc_stat_list=""
+    for pid in $CURRENT_PIDS; do
         pid=$(echo "$pid" | tr -d ' \r\n')
         [[ -z "$pid" ]] && continue
+        proc_stat_list="$proc_stat_list /proc/$pid/stat"
+    done
+    [[ -z "$proc_stat_list" ]] && return 1
 
-        # Read current jiffies for this PID
+    local stat_lines
+    stat_lines=$(adb_cmd shell cat $proc_stat_list 2>/dev/null)
+    if [[ -z "$stat_lines" ]]; then
+        if [[ $DEBUG_MODE -eq 1 ]]; then
+            print_warn "Failed to read /proc/pid/stat (process may have exited)"
+        fi
+        return 1
+    fi
+
+    while IFS= read -r line; do
+        # Extract pid
+        local pid afters
+        read -r pid afters <<< "$line"
+
+        # Extract everything after the last closing parenthesis ")".
+        # This safely skips the PID and the "comm" field, even if the filename
+        # contains spaces or parentheses.
+        local after_comm=${line##*)}
+
+        # Parse the remaining fields.
+        # Since we stripped the first two fields (PID and comm), the original
+        # 14th (utime) and 15th (stime) fields become the 12th and 13th fields
+        # relative to the 'state' field.
+        local state ppid pgrp session tty_nr tpgid flags minflt cminflt majflt cmajflt utime stime
+        read -r state ppid pgrp session tty_nr tpgid flags minflt cminflt majflt cmajflt utime stime afters <<< "$after_comm"
         local proc_now
-        proc_now=$(procstat_read_pid_jiffies "$pid")
-        if [[ -z "$proc_now" ]] || ! [[ "$proc_now" =~ ^[0-9]+$ ]]; then
-            if [[ $DEBUG_MODE -eq 1 ]]; then
-                print_warn "Failed to read /proc/$pid/stat (process may have exited)"
-            fi
-            continue
+        if [[ "$utime" =~ ^[0-9]+$ ]] && [[ "$stime" =~ ^[0-9]+$ ]]; then
+            proc_now=$((utime + stime))
         fi
 
         # Find previous jiffies from cache
@@ -654,7 +676,7 @@ collect_cpu_procstat() {
         if [[ $DEBUG_MODE -eq 1 ]]; then
             echo "  PID=$pid: prev=$proc_prev, now=$proc_now, delta=$proc_delta" >&2
         fi
-    done
+    done <<< "$stat_lines"
 
     # 4. Calculate system delta
     local total_delta=$((total_now - total_prev))
