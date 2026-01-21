@@ -75,6 +75,7 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
+CURRENT_PIDS=''
 ################################################################################
 # Print Utilities
 ################################################################################
@@ -331,10 +332,9 @@ check_app_running() {
 check_app_alive() {
     # Check if there are any matching package processes
     # (allowing dynamic process changes)
-    local current_pids
-    current_pids=$(get_all_pids | tr '\n' ' ')
+    CURRENT_PIDS=$(get_all_pids | tr '\n' ' ')
 
-    if [[ -z "$current_pids" ]]; then
+    if [[ -z "$CURRENT_PIDS" ]]; then
         print_error "The application has stopped running (no matching processes), test terminated"
         if [[ -f "$CPU_LOG" ]] && [[ $(wc -l < "$CPU_LOG" 2>/dev/null || echo 0) -gt 1 ]]; then
             print_info "Generating report with existing data..."
@@ -607,21 +607,12 @@ collect_cpu_procstat() {
     fi
     [[ -z "$total_prev" ]] && total_prev="0"
 
-    # 3. Get all current PIDs
-    local pids
-    pids=$(get_all_pids)
-    if [[ -z "$pids" ]]; then
-        print_warn "No process PIDs found (Time: ${elapsed}s)"
-        echo "$timestamp,$elapsed,0.00,0,0,NoPID" >> "$CPU_LOG"
-        # Update wall-clock to avoid cumulative delta
-        echo "$timestamp" > "$PROCSTAT_WALL_PREV_FILE"
-        return 1
-    fi
-
-    # 4. Read current PID jiffies and calculate delta
+    # 3. Read current PID jiffies and calculate delta
     local proc_delta_total=0
     local pid_count=0
     local new_pid_cache=""
+
+    local pids=$CURRENT_PIDS
 
     for pid in $pids; do
         pid=$(echo "$pid" | tr -d ' \r\n')
@@ -665,7 +656,7 @@ collect_cpu_procstat() {
         fi
     done
 
-    # 5. Calculate system delta
+    # 4. Calculate system delta
     local total_delta=$((total_now - total_prev))
     if [[ $total_delta -le 0 ]]; then
         print_warn "System jiffies delta invalid (delta=$total_delta), recording 0% (Time: ${elapsed}s)"
@@ -678,7 +669,7 @@ collect_cpu_procstat() {
         return 0
     fi
 
-    # 6. Check if this is the first sample (calibration sample)
+    # 5. Check if this is the first sample (calibration sample)
     # If elapsed time is very short (< CPU_INTERVAL/2), treat as baseline
     # calibration
     local cpu_percent window_ms filter_reason
@@ -689,7 +680,7 @@ collect_cpu_procstat() {
         filter_reason="Baseline"
         print_info "CPU Sample [${elapsed}s]: Baseline calibration (${pid_count} processes)"
     else
-        # 7. Calculate CPU%: 100 * NCPU * (proc_delta / total_delta)
+        # 6. Calculate CPU%: 100 * NCPU * (proc_delta / total_delta)
         # This makes "100% = 1 core fully utilized", matching dumpsys/top output
         cpu_percent=$(awk -v pd="$proc_delta_total" -v td="$total_delta" -v nc="$PROCSTAT_NCPU" \
             'BEGIN {printf "%.2f", 100.0 * nc * pd / td}')
@@ -697,12 +688,12 @@ collect_cpu_procstat() {
         filter_reason="Valid"
     fi
 
-    # 8. Calculate DMIPS
+    # 7. Calculate DMIPS
     local dmips
     dmips=$(awk -v cpu="$cpu_percent" -v base="$SINGLE_CORE_DMIPS" \
         'BEGIN {printf "%.0f", (cpu * base) / 100}')
 
-    # 9. Save to CSV
+    # 8. Save to CSV
     echo "$timestamp,$elapsed,$cpu_percent,$dmips,$window_ms,$filter_reason" >> "$CPU_LOG"
 
     if [[ $elapsed -lt $((CPU_INTERVAL / 2)) ]]; then
@@ -717,7 +708,7 @@ collect_cpu_procstat() {
         print_info "CPU Sample [${elapsed}s]: ${cpu_percent}% → ${dmips} DMIPS (window=${window_ms}ms, ${pid_count} processes, ${filter_reason})${excluded_marker}"
     fi
 
-    # 10. Update cache files for next iteration
+    # 9. Update cache files for next iteration
     echo "$total_now" > "$PROCSTAT_TOTAL_PREV_FILE"
     printf "%b" "$new_pid_cache" > "$PROCSTAT_PID_PREV_FILE"
     echo "$timestamp" > "$PROCSTAT_WALL_PREV_FILE"
@@ -880,8 +871,7 @@ collect_memory() {
     local TOTAL_RSS_KB=0
     local proc_count=0
 
-    local pids
-    pids=$(get_all_pids)
+    local pids=$CURRENT_PIDS
 
     if [[ -z "$pids" ]]; then
         print_warn "Unable to obtain process PID (Time: ${elapsed}s）"
@@ -1025,6 +1015,7 @@ run_test() {
     last_mem_time=$start_time
     last_alive_check=$start_time
 
+    check_app_alive
     print_info "Starting first sample..."
     collect_cpu 0
     collect_memory 0
