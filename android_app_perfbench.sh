@@ -47,6 +47,20 @@ SINGLE_CORE_DMIPS=20599  # Single-core 100% CPU ≈ 20K DMIPS (approximate compa
 DEBUG_MODE=0
 
 ################################################################################
+# Internal Thresholds (Advanced - modify with caution)
+################################################################################
+
+# dumpsys cpuinfo window range (milliseconds)
+# Samples outside this range are filtered as unreliable
+DUMPSYS_WINDOW_MIN_MS=5000   # Minimum valid window (5 seconds)
+DUMPSYS_WINDOW_MAX_MS=30000  # Maximum valid window (30 seconds)
+
+# Memory leak detection thresholds (MB/second)
+# Based on linear regression slope of PSS over time
+MEM_LEAK_THRESHOLD_MBS=0.005   # Slope > 0.005 MB/s (≈300 MB/hour) → possible leak
+MEM_DECLINE_THRESHOLD_MBS=0.001 # Slope < -0.001 MB/s → memory declining (no leak)
+
+################################################################################
 # Automatically Calculated Parameters (Do not modify)
 ################################################################################
 TEST_DURATION=$((TEST_DURATION_MINUTES * 60))
@@ -183,7 +197,7 @@ check_dependencies() {
     command -v bc  &> /dev/null || missing="${missing}bc "
     command -v awk &> /dev/null || missing="${missing}awk "
 
-    if [ -n "$missing" ]; then
+    if [[ -n "$missing" ]]; then
         print_error "Missing required tools: $missing"
         print_info "macOS Installation Methods:"
         [[ $missing == *"adb"* ]] && echo "  - adb: brew install --cask android-platform-tools"
@@ -278,7 +292,7 @@ check_app_running() {
                     print_warn "  1) Continue testing anyway (Press Enter)"
                     print_warn "  2) Manually kill processes and restart test (Press Ctrl+C, then run script again)"
                     print_warn ""
-                    read -p "Press Enter to continue or Ctrl+C to exit..." 
+                    read -r -p "Press Enter to continue or Ctrl+C to exit..." 
                 fi
             fi
             attempt=$((attempt + 1))
@@ -296,7 +310,7 @@ check_app_running() {
         print_info "Application $PACKAGE_NAME is not running, please start the application"
         print_warn "Please manually open the application and start an operation (e.g., play a video)"
         print_warn "Press Enter to continue..."
-        read
+        read -r
 
         pids=$(get_all_pids | tr '\n' ' ')
         if [[ -z "$pids" ]]; then
@@ -341,13 +355,13 @@ create_test_directory() {
     TEST_START_TIME=$(date '+%Y%m%d_%H%M%S')
     TEST_DIR="test_${TEST_START_TIME}"
 
-    if [ -d "$TEST_DIR" ]; then
+    if [[ -d "$TEST_DIR" ]]; then
         print_warn "Directory $TEST_DIR already exists, adding timestamp suffix..."
         TEST_DIR="${TEST_DIR}_$(date +%s)"
     fi
 
     mkdir -p "$TEST_DIR"
-    if [ ! -d "$TEST_DIR" ]; then
+    if [[ ! -d "$TEST_DIR" ]]; then
         print_error "Unable to create test directory: $TEST_DIR"
         exit 1
     fi
@@ -780,7 +794,7 @@ collect_cpu_dumpsys() {
         echo "================================" >&2
     fi
 
-    if [ -z "$cpu_output" ]; then
+    if [[ -z "$cpu_output" ]]; then
         local filter_reason="NoActivity"
         [[ "$window_ms" == "-1" ]] && filter_reason="ParseFailed"
         echo "$timestamp,$elapsed,0.00,0,$window_ms,$filter_reason" >> "$CPU_LOG"
@@ -801,7 +815,7 @@ collect_cpu_dumpsys() {
     dmips=$(echo "scale=2; ($cpu_percent * $SINGLE_CORE_DMIPS) / 100" | bc 2>/dev/null)
     if [[ -z "$dmips" ]] || [[ "$dmips" == "0" ]] && [[ "$cpu_percent" != "0.00" ]]; then
         dmips=$(awk -v cpu="$cpu_percent" -v base="$SINGLE_CORE_DMIPS" 'BEGIN {printf "%.0f", (cpu * base) / 100}')
-    elif [ -n "$dmips" ]; then
+    elif [[ -n "$dmips" ]]; then
         dmips=$(printf "%.0f" "$dmips" 2>/dev/null)
     fi
     [[ -z "$dmips" ]] && dmips="0"
@@ -810,9 +824,9 @@ collect_cpu_dumpsys() {
     local filter_reason="Valid"
     if [[ "$window_ms" == "-1" ]]; then
         filter_reason="WindowUnknown"
-    elif [[ "$window_ms" -lt 5000 ]]; then
+    elif [[ "$window_ms" -lt $DUMPSYS_WINDOW_MIN_MS ]]; then
         filter_reason="WindowTooShort"
-    elif [[ "$window_ms" -gt 30000 ]]; then
+    elif [[ "$window_ms" -gt $DUMPSYS_WINDOW_MAX_MS ]]; then
         filter_reason="WindowTooLong"
     fi
 
@@ -1008,22 +1022,22 @@ run_test() {
         current_time=$(date +%s)
         elapsed=$((current_time - start_time))
 
-        if [ $elapsed -ge $TEST_DURATION ]; then
+        if [[ $elapsed -ge $TEST_DURATION ]]; then
             print_info "Test completed!"
             break
         fi
 
-        if [ $((current_time - last_alive_check)) -ge 10 ]; then
+        if [[ $((current_time - last_alive_check)) -ge 10 ]]; then
             check_app_alive
             last_alive_check=$current_time
         fi
 
-        if [ $((current_time - last_cpu_time)) -ge $CPU_INTERVAL ]; then
+        if [[ $((current_time - last_cpu_time)) -ge $CPU_INTERVAL ]]; then
             collect_cpu "$elapsed"
             last_cpu_time=$current_time
         fi
 
-        if [ $((current_time - last_mem_time)) -ge $MEM_INTERVAL ]; then
+        if [[ $((current_time - last_mem_time)) -ge $MEM_INTERVAL ]]; then
             collect_memory "$elapsed"
             last_mem_time=$current_time
         fi
@@ -1040,7 +1054,7 @@ generate_report() {
 
     local cpu_samples
     cpu_samples=$(tail -n +2 "$CPU_LOG" 2>/dev/null | wc -l | tr -d ' ')
-    if [ -z "$cpu_samples" ] || [ "$cpu_samples" -eq 0 ]; then
+    if [[ -z "$cpu_samples" ]] || [[ "$cpu_samples" -eq 0 ]]; then
         print_error "No valid CPU data, unable to generate report"
         exit 1
     fi
@@ -1062,58 +1076,58 @@ generate_report() {
     if [[ "$CPU_METHOD" == "procstat" ]]; then
         window_filter='$5 > 0'  # procstat: exclude baseline (window=0)
     else
-        window_filter='($5>=5000 && $5<=30000)'  # dumpsys: sliding window range
+        window_filter='($5>=wmin && $5<=wmax)'  # dumpsys: sliding window range
     fi
 
     # Unified filter condition: window_filter OR (STRICT_WINDOW==0 and window==-1), AND CPU% >= MIN_CPU_PERCENT
-    valid_cpu_samples=$(tail -n +2 "$CPU_LOG" | awk -F',' -v min_cpu="$MIN_CPU_PERCENT" -v strict="$STRICT_WINDOW" -v method="$CPU_METHOD" '
+    valid_cpu_samples=$(tail -n +2 "$CPU_LOG" | awk -F',' -v min_cpu="$MIN_CPU_PERCENT" -v strict="$STRICT_WINDOW" -v method="$CPU_METHOD" -v wmin="$DUMPSYS_WINDOW_MIN_MS" -v wmax="$DUMPSYS_WINDOW_MAX_MS" '
         function check_window() {
             if (method == "procstat") return $5 > 0
-            else return ($5>=5000 && $5<=30000)
+            else return ($5>=wmin && $5<=wmax)
         }
         ( check_window() || (strict==0 && $5==-1) ) && ($3>=min_cpu) && ( $6=="Valid" || (strict==0 && $6=="WindowUnknown") ) {c++}
         END{print c+0}
     ')
-    invalid_cpu_samples=$(tail -n +2 "$CPU_LOG" | awk -F',' -v min_cpu="$MIN_CPU_PERCENT" -v strict="$STRICT_WINDOW" -v method="$CPU_METHOD" '
+    invalid_cpu_samples=$(tail -n +2 "$CPU_LOG" | awk -F',' -v min_cpu="$MIN_CPU_PERCENT" -v strict="$STRICT_WINDOW" -v method="$CPU_METHOD" -v wmin="$DUMPSYS_WINDOW_MIN_MS" -v wmax="$DUMPSYS_WINDOW_MAX_MS" '
         function check_window() {
             if (method == "procstat") return $5 > 0
-            else return ($5>=5000 && $5<=30000)
+            else return ($5>=wmin && $5<=wmax)
         }
         !( ( check_window() || (strict==0 && $5==-1) ) && ($3>=min_cpu) && ( $6=="Valid" || (strict==0 && $6=="WindowUnknown") ) ) {c++}
         END{print c+0}
     ')
 
-    avg_cpu=$(tail -n +2 "$CPU_LOG" | awk -F',' -v min_cpu="$MIN_CPU_PERCENT" -v strict="$STRICT_WINDOW" -v method="$CPU_METHOD" '
+    avg_cpu=$(tail -n +2 "$CPU_LOG" | awk -F',' -v min_cpu="$MIN_CPU_PERCENT" -v strict="$STRICT_WINDOW" -v method="$CPU_METHOD" -v wmin="$DUMPSYS_WINDOW_MIN_MS" -v wmax="$DUMPSYS_WINDOW_MAX_MS" '
         function check_window() {
             if (method == "procstat") return $5 > 0
-            else return ($5>=5000 && $5<=30000)
+            else return ($5>=wmin && $5<=wmax)
         }
         ( check_window() || (strict==0 && $5==-1) ) && ($3>=min_cpu) && ( $6=="Valid" || (strict==0 && $6=="WindowUnknown") ) {sum+=$3; c++}
         END{if(c>0) printf "%.2f", sum/c; else print "0"}
     ')
-    avg_dmips=$(tail -n +2 "$CPU_LOG" | awk -F',' -v min_cpu="$MIN_CPU_PERCENT" -v strict="$STRICT_WINDOW" -v method="$CPU_METHOD" '
+    avg_dmips=$(tail -n +2 "$CPU_LOG" | awk -F',' -v min_cpu="$MIN_CPU_PERCENT" -v strict="$STRICT_WINDOW" -v method="$CPU_METHOD" -v wmin="$DUMPSYS_WINDOW_MIN_MS" -v wmax="$DUMPSYS_WINDOW_MAX_MS" '
         function check_window() {
             if (method == "procstat") return $5 > 0
-            else return ($5>=5000 && $5<=30000)
+            else return ($5>=wmin && $5<=wmax)
         }
         ( check_window() || (strict==0 && $5==-1) ) && ($3>=min_cpu) && ( $6=="Valid" || (strict==0 && $6=="WindowUnknown") ) {sum+=$4; c++}
         END{if(c>0) printf "%.0f", sum/c; else print "0"}
     ')
 
-    peak_cpu=$(tail -n +2 "$CPU_LOG" | awk -F',' -v min_cpu="$MIN_CPU_PERCENT" -v strict="$STRICT_WINDOW" -v method="$CPU_METHOD" '
+    peak_cpu=$(tail -n +2 "$CPU_LOG" | awk -F',' -v min_cpu="$MIN_CPU_PERCENT" -v strict="$STRICT_WINDOW" -v method="$CPU_METHOD" -v wmin="$DUMPSYS_WINDOW_MIN_MS" -v wmax="$DUMPSYS_WINDOW_MAX_MS" '
         function check_window() {
             if (method == "procstat") return $5 > 0
-            else return ($5>=5000 && $5<=30000)
+            else return ($5>=wmin && $5<=wmax)
         }
         ( check_window() || (strict==0 && $5==-1) ) && ($3>=min_cpu) && ( $6=="Valid" || (strict==0 && $6=="WindowUnknown") ) {
             if(m=="" || $3+0>m+0) m=$3
         }
         END{if(m!="") printf "%.2f", m; else print "0"}
     ')
-    peak_dmips=$(tail -n +2 "$CPU_LOG" | awk -F',' -v min_cpu="$MIN_CPU_PERCENT" -v strict="$STRICT_WINDOW" -v method="$CPU_METHOD" '
+    peak_dmips=$(tail -n +2 "$CPU_LOG" | awk -F',' -v min_cpu="$MIN_CPU_PERCENT" -v strict="$STRICT_WINDOW" -v method="$CPU_METHOD" -v wmin="$DUMPSYS_WINDOW_MIN_MS" -v wmax="$DUMPSYS_WINDOW_MAX_MS" '
         function check_window() {
             if (method == "procstat") return $5 > 0
-            else return ($5>=5000 && $5<=30000)
+            else return ($5>=wmin && $5<=wmax)
         }
         ( check_window() || (strict==0 && $5==-1) ) && ($3>=min_cpu) && ( $6=="Valid" || (strict==0 && $6=="WindowUnknown") ) {
             if(m=="" || $4+0>m+0) m=$4
@@ -1121,20 +1135,20 @@ generate_report() {
         END{if(m!="") printf "%.0f", m; else print "0"}
     ')
 
-    min_cpu=$(tail -n +2 "$CPU_LOG" | awk -F',' -v min_cpu="$MIN_CPU_PERCENT" -v strict="$STRICT_WINDOW" -v method="$CPU_METHOD" '
+    min_cpu=$(tail -n +2 "$CPU_LOG" | awk -F',' -v min_cpu="$MIN_CPU_PERCENT" -v strict="$STRICT_WINDOW" -v method="$CPU_METHOD" -v wmin="$DUMPSYS_WINDOW_MIN_MS" -v wmax="$DUMPSYS_WINDOW_MAX_MS" '
         function check_window() {
             if (method == "procstat") return $5 > 0
-            else return ($5>=5000 && $5<=30000)
+            else return ($5>=wmin && $5<=wmax)
         }
         ( check_window() || (strict==0 && $5==-1) ) && ($3>=min_cpu) && ( $6=="Valid" || (strict==0 && $6=="WindowUnknown") ) {
             if(m=="" || $3+0<m+0) m=$3
         }
         END{if(m!="") printf "%.2f", m; else print "0"}
     ')
-    min_dmips=$(tail -n +2 "$CPU_LOG" | awk -F',' -v min_cpu="$MIN_CPU_PERCENT" -v strict="$STRICT_WINDOW" -v method="$CPU_METHOD" '
+    min_dmips=$(tail -n +2 "$CPU_LOG" | awk -F',' -v min_cpu="$MIN_CPU_PERCENT" -v strict="$STRICT_WINDOW" -v method="$CPU_METHOD" -v wmin="$DUMPSYS_WINDOW_MIN_MS" -v wmax="$DUMPSYS_WINDOW_MAX_MS" '
         function check_window() {
             if (method == "procstat") return $5 > 0
-            else return ($5>=5000 && $5<=30000)
+            else return ($5>=wmin && $5<=wmax)
         }
         ( check_window() || (strict==0 && $5==-1) ) && ($3>=min_cpu) && ( $6=="Valid" || (strict==0 && $6=="WindowUnknown") ) {
             if(m=="" || $4+0<m+0) m=$4
@@ -1158,7 +1172,7 @@ generate_report() {
 
     local mem_samples
     mem_samples=$(tail -n +2 "$MEM_LOG" 2>/dev/null | wc -l | tr -d ' ')
-    if [ -z "$mem_samples" ] || [ "$mem_samples" -eq 0 ]; then
+    if [[ -z "$mem_samples" ]] || [[ "$mem_samples" -eq 0 ]]; then
         print_error "No valid memory data, unable to generate report"
         exit 1
     fi
@@ -1183,6 +1197,9 @@ generate_report() {
     # First validate data format, then calculate increment
     if [[ "$first_mem" =~ ^[0-9]+(\.[0-9]+)?$ ]] && [[ "$last_mem" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
         mem_increase=$(echo "$last_mem - $first_mem" | bc 2>/dev/null)
+        if [[ -z "$mem_increase" ]]; then
+            mem_increase=$(awk -v l="$last_mem" -v f="$first_mem" 'BEGIN {printf "%.2f", l - f}')
+        fi
         [[ -z "$mem_increase" ]] && mem_increase="0"
     fi
 
@@ -1205,9 +1222,15 @@ generate_report() {
     if [[ "$first_mem" =~ ^[0-9]+(\.[0-9]+)?$ ]] && [[ "$last_mem" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
         local ok
         ok=$(echo "$first_mem > 0" | bc 2>/dev/null | tr -d '\r\n')
+        if [[ -z "$ok" ]]; then
+            ok=$(awk -v f="$first_mem" 'BEGIN {print (f > 0) ? 1 : 0}')
+        fi
         if [[ "$ok" == "1" ]]; then
             local pct
             pct=$(echo "scale=2; ($mem_increase / $first_mem) * 100" | bc 2>/dev/null)
+            if [[ -z "$pct" ]]; then
+                pct=$(awk -v m="$mem_increase" -v f="$first_mem" 'BEGIN {printf "%.2f", (m / f) * 100}')
+            fi
             if [[ -n "$pct" ]]; then
                 mem_increase_display="Increase ${pct}%"
             else
@@ -1226,11 +1249,20 @@ generate_report() {
         mem_leak="Unable to determine (Insufficient data)"
     elif [[ "$mem_slope" =~ ^-?[0-9]+(\.[0-9]+)?$ ]]; then
         local is_high is_low
-        is_high=$(echo "$mem_slope > 0.005" | bc 2>/dev/null | tr -d '\r\n')   # 0.005MB/s ≈ 300MB/h
-        is_low=$(echo "$mem_slope < -0.001" | bc 2>/dev/null | tr -d '\r\n')
+        is_high=$(echo "$mem_slope > $MEM_LEAK_THRESHOLD_MBS" | bc 2>/dev/null | tr -d '\r\n')
+        if [[ -z "$is_high" ]]; then
+            is_high=$(awk -v s="$mem_slope" -v t="$MEM_LEAK_THRESHOLD_MBS" 'BEGIN {print (s > t) ? 1 : 0}')
+        fi
+        is_low=$(echo "$mem_slope < -$MEM_DECLINE_THRESHOLD_MBS" | bc 2>/dev/null | tr -d '\r\n')
+        if [[ -z "$is_low" ]]; then
+            is_low=$(awk -v s="$mem_slope" -v t="$MEM_DECLINE_THRESHOLD_MBS" 'BEGIN {print (s < -t) ? 1 : 0}')
+        fi
         if [[ "$is_high" == "1" ]]; then
             local inc
             inc=$(echo "scale=2; $mem_slope * $TEST_DURATION" | bc 2>/dev/null)
+            if [[ -z "$inc" ]]; then
+                inc=$(awk -v s="$mem_slope" -v d="$TEST_DURATION" 'BEGIN {printf "%.2f", s * d}')
+            fi
             mem_leak="Possible (Growth rate ${mem_slope} MB/second, Estimated ${TEST_DURATION_MINUTES} minutes growth ${inc} MB)"
         elif [[ "$is_low" == "1" ]]; then
             mem_leak="No (Memory trending down, slope ${mem_slope} MB/second)"
@@ -1248,6 +1280,9 @@ generate_report() {
 
     if [[ -n "$actual_duration" ]] && [[ "$actual_duration" =~ ^[0-9]+$ ]]; then
         actual_minutes=$(echo "scale=1; $actual_duration / 60" | bc 2>/dev/null)
+        if [[ -z "$actual_minutes" ]]; then
+            actual_minutes=$(awk -v d="$actual_duration" 'BEGIN {printf "%.1f", d / 60}')
+        fi
     else
         actual_duration="N/A"
     fi
@@ -1298,7 +1333,7 @@ generate_report() {
 $(echo "$filter_reason_stats" | sed 's/^/  - /')
 - **STRICT_WINDOW**: ${STRICT_WINDOW} (0=allow WindowMs=-1, 1=exclude WindowMs=-1)
 - **Filtering Criteria**: 
-  - Valid window range: 5000ms - 30000ms (for dumpsys sliding window) or >0ms (for procstat real wall-clock delta)
+  - Valid window range: ${DUMPSYS_WINDOW_MIN_MS}ms - ${DUMPSYS_WINDOW_MAX_MS}ms (for dumpsys sliding window) or >0ms (for procstat real wall-clock delta)
   - Minimum CPU threshold: >= ${MIN_CPU_PERCENT}% (configurable via MIN_CPU_PERCENT parameter)
 - **Description**:
   - CPU% is the sum of CPU occupancy ratios of all matched same-package processes within the sampling window (may be > 100% on multi-core devices)
@@ -1327,7 +1362,7 @@ $(echo "$filter_reason_stats" | sed 's/^/  - /')
 - **Detection Result**: ${mem_leak}
 - **Memory Sampling Count**: $mem_samples times (every ${MEM_INTERVAL} seconds)
 - **PSS Change**: From ${first_mem} MB to ${last_mem} MB（${mem_increase_display}）
-- **Threshold**: 0.005 MB/second (≈ 300 MB/hour)
+- **Threshold**: ${MEM_LEAK_THRESHOLD_MBS} MB/second (≈ $(awk -v t="$MEM_LEAK_THRESHOLD_MBS" 'BEGIN {printf "%.0f", t*3600}') MB/hour)
 
 ---
 
