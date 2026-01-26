@@ -1,0 +1,23 @@
+# macOS system files
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Test output directories
+test_*/
+
+# Generated reports (keep in test directories only)
+/report.html
+/test_report.html
+/report.md
+
+# Temporary files
+*.tmp
+*.swp
+*.swo
+*~
+
+# IDE/Editor files
+.vscode/
+.idea/
+*.iml

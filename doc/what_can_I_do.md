@@ -35,6 +35,7 @@ This script is an automated performance testing tool designed to measure CPU and
 - 🔍 **Memory Leak Detection**: Linear regression analysis to detect memory growth trends
 - 🔄 **Multi-Process Support**: Automatic detection of main and child processes
 - 📝 **Detailed Reporting**: Markdown reports with statistical analysis
+- 🌐 **Interactive HTML Report**: Optional `report.html` with interactive charts/tables (generated via `tools/report_html.sh`)
 - ⚡ **Graceful Interruption**: `Ctrl+C` generates partial reports from collected data
 
 ---

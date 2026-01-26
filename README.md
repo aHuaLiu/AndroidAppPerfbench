@@ -1,5 +1,9 @@
 # Android Application Performance Testing Guide (English Version)
 
+Languages: [English](README.md) | [简体中文](README-CN.md) 
+
+Docs: [Technical Doc (EN)](doc/what_can_I_do.md) | [技术文档 (CN)](doc/what_can_I_do_cn.md) | [技術ドキュメント (JA)](doc/what_can_I_do_ja.md)
+
 > **Test Objective**: Measure CPU and memory performance of a specific Android application during usage  
 > **Test Platform**: macOS, Linux + Android device
 
@@ -160,6 +164,16 @@ Adjust based on your CPU info:
 - Formula 1: `Total DMIPS / CPU cores`
 - Formula 2: `Sum of per-core DMIPS / core count`
 
+#### Optional: Generate Interactive HTML Report
+```bash
+GENERATE_HTML_REPORT=1
+```
+
+- `1`: generate `report.html` in the test output directory (interactive charts/tables)
+- `0`: skip HTML generation and only output `report.md`
+
+Note: the HTML report references CDN assets; an internet connection may be required when opening it.
+
 ---
 
 ## Step 5: Run the Performance Test
@@ -202,6 +216,10 @@ Test will begin and print logs:
 [INFO] Memory sampling [10s]: PSS=122.30 MB, RSS=252.10 MB (pid-by-pid, 3 processes)
 ```
 
+**Script Running Example:**
+
+![Script Running Screenshot](doc/image1.png)
+
 ### 5.3 Early Stop
 
 To manually stop the test:
@@ -220,6 +238,20 @@ Includes:
 - CPU data: `cpu_log.csv`
 - Memory data: `mem_log.csv`
 - Final report: `report.md`
+- Optional HTML report: `report.html`
+
+Open the HTML report:
+```bash
+# macOS
+open ./test_20260108_123456/report.html
+
+# Linux (common)
+xdg-open ./test_20260108_123456/report.html
+```
+
+**HTML Report Example:**
+
+![HTML Report Screenshot](doc/image2.png)
 
 ---
 

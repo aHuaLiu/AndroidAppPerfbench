@@ -1,5 +1,9 @@
 # Android Application Performance Testing Guide
 
+Languages: [English](README.md) | [简体中文](README-CN.md) 
+
+Docs: [Technical Doc (EN)](doc/what_can_I_do.md) | [技术文档 (CN)](doc/what_can_I_do_cn.md) | [技術ドキュメント (JA)](doc/what_can_I_do_ja.md)
+
 > **测试目标**：测量某Android应用在使用期间的CPU和内存性能
 > **测试平台**：macOS,linux + Android 设备
 
@@ -193,6 +197,17 @@ SINGLE_CORE_DMIPS=20000
      - 计算公式：`SINGLE_CORE_DMIPS = 每个核的算力叠加（总的算力） / CPU 核数`
 - 请务必在测试前确认硬件信息并替换默认值。
 
+#### 可选：生成交互式 HTML 报告
+
+```bash
+GENERATE_HTML_REPORT=1
+```
+
+- `1`：在测试输出目录生成 `report.html`（交互图表/表格）
+- `0`：仅输出 `report.md`
+
+说明：HTML 报告依赖 CDN 资源，打开时可能需要联网。
+
 ## 第五步：运行性能测试
 
 ### 5.1 测试前的准备
@@ -253,6 +268,10 @@ chmod +x android_app_perfbench.sh
 ...
 ```
 
+**脚本运行示例：**
+
+![脚本运行截图](doc/image1.png)
+
 ### 5.4 测试期间注意事项
 
 如果需要在测试结束前停止：
@@ -305,8 +324,23 @@ chmod +x android_app_perfbench.sh
    - CPU data: ./test_20260108_123456/cpu_log.csv
    - Memory data: ./test_20260108_123456/mem_log.csv
    - Test report: ./test_20260108_123456/report.md
-==========================================
+   - HTML report: ./test_20260108_123456/report.html
+   ==========================================
 ```
+
+打开 HTML 报告：
+
+```bash
+# macOS
+open ./test_20260108_123456/report.html
+
+# Linux（常见）
+xdg-open ./test_20260108_123456/report.html
+```
+
+**HTML 报告示例：**
+
+![HTML报告截图](doc/image2.png)
 
 ---
 

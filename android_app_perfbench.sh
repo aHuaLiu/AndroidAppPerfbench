@@ -13,7 +13,7 @@
 ################################################################################
 
 # Application package name (main process name)
-PACKAGE_NAME="com.xxx.yyy"
+PACKAGE_NAME="com.google.android.youtube"
 
 # ADB device serial number (optional) - Specify the target device when multiple devices are connected
 # Leave blank to automatically select the first online device; you can also manually specify, e.g., ADB_SERIAL="emulator-5554"
@@ -45,6 +45,9 @@ SINGLE_CORE_DMIPS=20599  # Single-core 100% CPU ≈ 20K DMIPS (approximate compa
 
 # Debug mode (1=output more diagnostic information)
 DEBUG_MODE=0
+
+# Generate interactive HTML report (1=enabled, 0=disabled)
+GENERATE_HTML_REPORT=1
 
 ################################################################################
 # Internal Thresholds (Advanced - modify with caution)
@@ -1366,6 +1369,43 @@ $(echo "$filter_reason_stats" | sed 's/^/  - /')
 
 ---
 
+## Machine-Readable Config (for report_html.sh)
+
+<!-- PERFbench:CONFIG:BEGIN -->
+CPU_METHOD=${CPU_METHOD}
+CPU_INTERVAL=${CPU_INTERVAL}
+MEM_INTERVAL=${MEM_INTERVAL}
+MIN_CPU_PERCENT=${MIN_CPU_PERCENT}
+STRICT_WINDOW=${STRICT_WINDOW}
+DUMPSYS_WINDOW_MIN_MS=${DUMPSYS_WINDOW_MIN_MS}
+DUMPSYS_WINDOW_MAX_MS=${DUMPSYS_WINDOW_MAX_MS}
+MEM_LEAK_THRESHOLD_MBS=${MEM_LEAK_THRESHOLD_MBS}
+MEM_DECLINE_THRESHOLD_MBS=${MEM_DECLINE_THRESHOLD_MBS}
+SINGLE_CORE_DMIPS=${SINGLE_CORE_DMIPS}
+<!-- PERFbench:CONFIG:END -->
+
+<!-- PERFbench:STATS:BEGIN -->
+AVG_CPU=${avg_cpu}
+PEAK_CPU=${peak_cpu}
+MIN_CPU=${min_cpu}
+AVG_DMIPS=${avg_dmips}
+PEAK_DMIPS=${peak_dmips}
+MIN_DMIPS=${min_dmips}
+AVG_PSS_MB=${avg_mem}
+MAX_PSS_MB=${max_mem}
+MIN_PSS_MB=${min_mem}
+AVG_RSS_MB=${avg_rss}
+MAX_RSS_MB=${max_rss}
+MIN_RSS_MB=${min_rss}
+CPU_SAMPLES_TOTAL=${cpu_samples}
+CPU_SAMPLES_VALID=${valid_cpu_samples}
+CPU_SAMPLES_FILTERED=${invalid_cpu_samples}
+CPU_SAMPLES_UNKNOWN_WINDOW=${unknown_window_samples}
+MEM_SAMPLES_TOTAL=${mem_samples}
+<!-- PERFbench:STATS:END -->
+
+---
+
 ## Detailed Data
 
 - **Test Result Directory**: \`$TEST_DIR\`
@@ -1378,6 +1418,64 @@ $(echo "$filter_reason_stats" | sed 's/^/  - /')
 EOF
 
     print_info "Report generated: $REPORT_FILE"
+
+    # Optional: Generate interactive HTML report (React + Chart.js + Tabulator)
+    if [[ ${GENERATE_HTML_REPORT:-0} -eq 1 ]]; then
+        local script_dir html_generator
+        
+        # Get script directory without using cd (AGENTS.md compliant)
+        script_dir="$(dirname "${BASH_SOURCE[0]}")"
+        if [[ "$script_dir" != /* ]]; then
+            # Convert relative path to absolute
+            script_dir="$(pwd)/${script_dir}"
+        fi
+        html_generator="${script_dir}/tools/report_html.sh"
+
+        if [[ -x "$html_generator" ]]; then
+            # Pass all necessary environment variables to HTML generator
+            TEST_DIR="$TEST_DIR" \
+            CPU_LOG="$CPU_LOG" \
+            MEM_LOG="$MEM_LOG" \
+            REPORT_HTML_FILE="${TEST_DIR}/report.html" \
+            TEST_START_TIME="$TEST_START_TIME" \
+            PACKAGE_NAME="$PACKAGE_NAME" \
+            CPU_METHOD="$CPU_METHOD" \
+            CPU_INTERVAL="$CPU_INTERVAL" \
+            MEM_INTERVAL="$MEM_INTERVAL" \
+            TEST_DURATION_MINUTES="$TEST_DURATION_MINUTES" \
+            actual_duration="$actual_duration" \
+            actual_minutes="$actual_minutes" \
+            test_status="$test_status" \
+            MIN_CPU_PERCENT="$MIN_CPU_PERCENT" \
+            STRICT_WINDOW="$STRICT_WINDOW" \
+            DUMPSYS_WINDOW_MIN_MS="$DUMPSYS_WINDOW_MIN_MS" \
+            DUMPSYS_WINDOW_MAX_MS="$DUMPSYS_WINDOW_MAX_MS" \
+            MEM_LEAK_THRESHOLD_MBS="$MEM_LEAK_THRESHOLD_MBS" \
+            MEM_DECLINE_THRESHOLD_MBS="$MEM_DECLINE_THRESHOLD_MBS" \
+            SINGLE_CORE_DMIPS="$SINGLE_CORE_DMIPS" \
+            avg_cpu="$avg_cpu" \
+            peak_cpu="$peak_cpu" \
+            min_cpu="$min_cpu" \
+            avg_dmips="$avg_dmips" \
+            peak_dmips="$peak_dmips" \
+            min_dmips="$min_dmips" \
+            avg_mem="$avg_mem" \
+            max_mem="$max_mem" \
+            min_mem="$min_mem" \
+            avg_rss="$avg_rss" \
+            max_rss="$max_rss" \
+            min_rss="$min_rss" \
+            mem_leak="$mem_leak" \
+            cpu_samples="$cpu_samples" \
+            valid_cpu_samples="$valid_cpu_samples" \
+            invalid_cpu_samples="$invalid_cpu_samples" \
+            unknown_window_samples="$unknown_window_samples" \
+            mem_samples="$mem_samples" \
+                bash "$html_generator" 2>/dev/null || true
+        else
+            print_warn "HTML generator not found/executable: $html_generator"
+        fi
+    fi
 
     echo ""
     echo "=========================================="
